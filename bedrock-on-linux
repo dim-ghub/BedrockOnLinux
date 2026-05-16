@@ -36,7 +36,7 @@ from pathlib import Path
 
 APP = "bedrock-on-linux"
 PRETTY = "BedrockOnLinux"
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 
 HOME = Path.home()
 DATA = Path(os.environ.get("BOL_HOME", HOME / ".local/share" / APP))
@@ -721,7 +721,7 @@ def do_setup(game_dir=None, mc_ver=None, proton_tag=None, pp_tag=None,
     fix_curl_ssl(gd)
     setup_prefix(gd)
     s = load_settings()
-    s.setdefault("server", {"host": "geo.hivebedrock.network", "port": 19132})
+    s.setdefault("server", {"host": "play.linesia.net", "port": 19132})
     save_settings(s)
     proxypass_config(s["server"]["host"], s["server"]["port"])
     ok("Setup complete.")
@@ -795,108 +795,175 @@ def gui():
         import tkinter as tk
         from tkinter import ttk, filedialog
     except Exception:
-        warn("Tkinter missing (install python3-tk). Falling back to CLI help.")
+        warn("Tkinter manquant (installe python3-tk).")
         return
 
+    BG, CARD, CARD2 = "#0f1115", "#171a21", "#1d212b"
+    FG, SUB, ACC, ACC2, FIELD = "#e8eaed", "#9aa0aa", "#43a047", "#4caf50", "#21262f"
+
     s = load_settings()
+    srv = s.get("server", {})
     root = tk.Tk()
     root.title(f"{PRETTY} {VERSION}")
-    root.geometry("680x620")
-    try:
-        root.iconphoto(True, tk.PhotoImage(file=str(
-            Path(__file__).resolve().parent / "data/icon.png")))
-    except Exception:
-        pass
-    style = ttk.Style()
-    try:
-        style.theme_use("clam")
-    except Exception:
-        pass
+    root.minsize(720, 690)
+    root.configure(bg=BG)
 
-    pad = dict(padx=10, pady=5)
-    tk.Label(root, text="Minecraft Bedrock — Linux", font=("", 16, "bold")).pack(pady=8)
+    icon_img = None
+    here = Path(__file__).resolve().parent
+    for p in (here / "data/icon.png",
+              Path("/usr/lib/bedrock-on-linux/data/icon.png"),
+              Path("/usr/share/icons/hicolor/256x256/apps/bedrock-on-linux.png")):
+        if p.exists():
+            try:
+                icon_img = tk.PhotoImage(file=str(p))
+                root.iconphoto(True, icon_img)
+                root._icon = icon_img
+                break
+            except Exception:
+                pass
+
+    stl = ttk.Style()
+    try:
+        stl.theme_use("clam")
+    except Exception:
+        pass
+    stl.configure(".", background=BG, foreground=FG, fieldbackground=FIELD,
+                   bordercolor=CARD2, lightcolor=CARD2, darkcolor=CARD2)
+    stl.configure("TButton", background=CARD2, foreground=FG, borderwidth=0,
+                  focuscolor=BG, padding=8)
+    stl.map("TButton", background=[("active", "#2c323d")])
+    stl.configure("Accent.TButton", background=ACC, foreground="white",
+                  font=("", 12, "bold"), padding=12)
+    stl.map("Accent.TButton",
+            background=[("active", ACC2), ("disabled", "#2f3a2c")])
+    stl.configure("TCombobox", fieldbackground=FIELD, background=FIELD,
+                  foreground=FG, arrowcolor=FG, borderwidth=0, padding=4)
+    stl.map("TCombobox", fieldbackground=[("readonly", FIELD)])
+    stl.configure("TEntry", fieldbackground=FIELD, foreground=FG,
+                  insertcolor=FG, borderwidth=0, padding=4)
+    stl.configure("TCheckbutton", background=CARD, foreground=SUB)
+    stl.map("TCheckbutton", background=[("active", CARD)])
+    stl.configure("Bar.Horizontal.TProgressbar", background=ACC2,
+                  troughcolor=CARD2, borderwidth=0)
+    root.option_add("*TCombobox*Listbox.background", FIELD)
+    root.option_add("*TCombobox*Listbox.foreground", FG)
+    root.option_add("*TCombobox*Listbox.selectBackground", ACC)
 
     pp = ProxyPass()
     versions = {"mc": [], "proton": [], "pp": []}
 
-    # --- Minecraft version --------------------------------------------------
-    f1 = ttk.LabelFrame(root, text="Version Minecraft")
-    f1.pack(fill="x", **pad)
+    head = tk.Frame(root, bg=BG)
+    head.pack(fill="x", padx=20, pady=(18, 8))
+    if icon_img is not None:
+        try:
+            sm = icon_img.subsample(max(1, icon_img.width() // 56))
+            li = tk.Label(head, image=sm, bg=BG)
+            li.image = sm
+            li.pack(side="left", padx=(0, 14))
+        except Exception:
+            pass
+    ht = tk.Frame(head, bg=BG)
+    ht.pack(side="left", anchor="w")
+    tk.Label(ht, text="BedrockOnLinux", bg=BG, fg=FG,
+             font=("", 19, "bold")).pack(anchor="w")
+    tk.Label(ht, text="Minecraft Bedrock — installe, configure, joue.",
+             bg=BG, fg=SUB).pack(anchor="w")
+
+    def card(title):
+        outer = tk.Frame(root, bg=BG)
+        outer.pack(fill="x", padx=20, pady=7)
+        c = tk.Frame(outer, bg=CARD)
+        c.pack(fill="x")
+        inn = tk.Frame(c, bg=CARD)
+        inn.pack(fill="x", padx=16, pady=13)
+        tk.Label(inn, text=title, bg=CARD, fg=ACC2,
+                 font=("", 10, "bold")).pack(anchor="w", pady=(0, 9))
+        body = tk.Frame(inn, bg=CARD)
+        body.pack(fill="x")
+        return body
+
+    cv = card("①  Version Minecraft")
     beta_var = tk.BooleanVar(value=False)
     mc_var = tk.StringVar()
-    mc_cb = ttk.Combobox(f1, textvariable=mc_var, width=34, state="readonly")
-    mc_cb.grid(row=0, column=0, padx=6, pady=6)
-    ttk.Checkbutton(f1, text="Inclure les bêtas", variable=beta_var,
-                    command=lambda: refresh_mc()).grid(row=0, column=1)
+    mc_cb = ttk.Combobox(cv, textvariable=mc_var, width=28, state="readonly")
+    mc_cb.grid(row=0, column=0, sticky="w")
+    ttk.Checkbutton(cv, text="inclure bêtas", variable=beta_var,
+                    command=lambda: threading.Thread(
+                        target=refresh_mc, daemon=True).start()
+                    ).grid(row=0, column=1, padx=12)
     own = tk.StringVar(value=s.get("game_dir", ""))
-    ttk.Button(f1, text="…ou choisir un dossier",
-               command=lambda: own.set(filedialog.askdirectory() or own.get())
-               ).grid(row=0, column=2, padx=6)
+    ttk.Button(cv, text="… dossier perso",
+               command=lambda: own.set(
+                   filedialog.askdirectory() or own.get())
+               ).grid(row=0, column=2, padx=4)
 
-    # --- Proton / ProxyPass -------------------------------------------------
-    f2 = ttk.LabelFrame(root, text="Moteur")
-    f2.pack(fill="x", **pad)
-    ttk.Label(f2, text="GDK-Proton :").grid(row=0, column=0, sticky="e")
+    ce = card("②  Moteur (téléchargé & patché automatiquement)")
+    tk.Label(ce, text="GDK-Proton", bg=CARD, fg=SUB).grid(row=0, column=0, sticky="w")
     proton_var = tk.StringVar()
-    ttk.Combobox(f2, textvariable=proton_var, width=22, state="readonly",
-                 name="proton").grid(row=0, column=1, padx=6, pady=4)
-    ttk.Label(f2, text="ProxyPass :").grid(row=0, column=2, sticky="e")
-    pp_var = tk.StringVar(value="auto (selon version MC)")
-    ttk.Combobox(f2, textvariable=pp_var, width=22, state="readonly",
-                 name="pp").grid(row=0, column=3, padx=6, pady=4)
+    proton_cb = ttk.Combobox(ce, textvariable=proton_var, width=20,
+                             state="readonly")
+    proton_cb.grid(row=0, column=1, padx=8)
+    tk.Label(ce, text="ProxyPass", bg=CARD, fg=SUB).grid(row=0, column=2, padx=(18, 0))
+    pp_var = tk.StringVar(value="auto")
+    pp_cb = ttk.Combobox(ce, textvariable=pp_var, width=18, state="readonly")
+    pp_cb.grid(row=0, column=3, padx=8)
 
-    # --- Server -------------------------------------------------------------
-    f3 = ttk.LabelFrame(root, text="Serveur multijoueur (ProxyPass)")
-    f3.pack(fill="x", **pad)
-    host_var = tk.StringVar(value=s.get("server", {}).get("host", "geo.hivebedrock.network"))
-    port_var = tk.StringVar(value=str(s.get("server", {}).get("port", 19132)))
-    ttk.Label(f3, text="Adresse :").grid(row=0, column=0, sticky="e")
-    ttk.Entry(f3, textvariable=host_var, width=34).grid(row=0, column=1, padx=6, pady=6)
-    ttk.Label(f3, text="Port :").grid(row=0, column=2, sticky="e")
-    ttk.Entry(f3, textvariable=port_var, width=8).grid(row=0, column=3, padx=6)
+    cs = card("③  Serveur multijoueur (relais ProxyPass)")
+    host_var = tk.StringVar(value=srv.get("host", "play.linesia.net"))
+    port_var = tk.StringVar(value=str(srv.get("port", 19132)))
+    tk.Label(cs, text="Adresse", bg=CARD, fg=SUB).grid(row=0, column=0, sticky="w")
+    ttk.Entry(cs, textvariable=host_var, width=30).grid(row=0, column=1, padx=8)
+    tk.Label(cs, text="Port", bg=CARD, fg=SUB).grid(row=0, column=2, padx=(16, 0))
+    ttk.Entry(cs, textvariable=port_var, width=8).grid(row=0, column=3, padx=8)
 
-    # --- Microsoft account --------------------------------------------------
-    f4 = ttk.LabelFrame(root, text="Compte Microsoft (multijoueur)")
-    f4.pack(fill="x", **pad)
-    ms_state = tk.StringVar(value="Connecté ✓" if proxypass_signed_in()
-                            else "Non connecté")
-    ttk.Label(f4, textvariable=ms_state).grid(row=0, column=0, padx=6, pady=6)
-    ms_code = tk.StringVar(value="")
-    ttk.Label(f4, textvariable=ms_code, foreground="#b58900").grid(row=0, column=1)
+    cm = card("④  Compte Microsoft (requis pour le multijoueur)")
+    signed = proxypass_signed_in()
+    ms_state = tk.StringVar(value="Connecté ✓" if signed else "Non connecté")
+    msl = tk.Label(cm, textvariable=ms_state, bg=CARD,
+                   fg=ACC2 if signed else SUB, font=("", 10, "bold"))
+    msl.grid(row=0, column=0, sticky="w")
+
+    def on_auth(u, code):
+        ms_state.set("Connexion requise")
+        msl.configure(fg="#e0b341")
+        ms_code.set(f"➜  {u}     code : {code}")
+
+    def on_online():
+        ms_state.set("Connecté ✓")
+        msl.configure(fg=ACC2)
+        ms_code.set("")
 
     def open_link():
         if pp.auth:
             subprocess.Popen(["xdg-open", pp.auth[0]],
-                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                             stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL)
 
     def copy_code():
         if pp.auth and pp.auth[1]:
             root.clipboard_clear()
             root.clipboard_append(pp.auth[1])
 
-    ttk.Button(f4, text="Ouvrir le lien", command=open_link).grid(row=0, column=2, padx=4)
-    ttk.Button(f4, text="Copier le code", command=copy_code).grid(row=0, column=3, padx=4)
+    ttk.Button(cm, text="Se connecter", command=lambda: threading.Thread(
+        target=lambda: (ensure_jre(), pp.start(on_auth, on_online)),
+        daemon=True).start()).grid(row=0, column=1, padx=6)
+    ttk.Button(cm, text="Ouvrir le lien", command=open_link
+               ).grid(row=0, column=2, padx=6)
+    ttk.Button(cm, text="Copier le code", command=copy_code
+               ).grid(row=0, column=3, padx=6)
+    ms_code = tk.StringVar(value="")
+    tk.Label(cm, textvariable=ms_code, bg=CARD, fg="#e0b341"
+             ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
-    def on_auth(url, code):
-        ms_state.set("Connexion requise →")
-        ms_code.set(f"{url}  |  code: {code}")
-
-    def on_online():
-        ms_state.set("Connecté ✓")
-        ms_code.set("")
-
-    ttk.Button(f4, text="Se connecter à Microsoft",
-               command=lambda: threading.Thread(
-                   target=lambda: (ensure_jre(),
-                                   pp.start(on_auth, on_online)),
-                   daemon=True).start()).grid(row=1, column=0, columnspan=2, pady=4)
-
-    # --- progress + log -----------------------------------------------------
-    prog = ttk.Progressbar(root, mode="determinate")
-    prog.pack(fill="x", **pad)
-    logbox = tk.Text(root, height=9, bg="#10131a", fg="#7fd17f",
-                     insertbackground="#7fd17f", relief="flat")
-    logbox.pack(fill="both", expand=True, **pad)
+    prog = ttk.Progressbar(root, style="Bar.Horizontal.TProgressbar",
+                           mode="determinate")
+    prog.pack(fill="x", padx=20, pady=(10, 4))
+    lw = tk.Frame(root, bg=BG)
+    lw.pack(fill="both", expand=True, padx=20, pady=4)
+    logbox = tk.Text(lw, height=8, bg="#0b0d11", fg="#79d279", bd=0,
+                     relief="flat", insertbackground="#79d279",
+                     font=("monospace", 9), highlightthickness=0)
+    logbox.pack(fill="both", expand=True)
 
     def glog(line):
         logbox.insert("end", line + "\n")
@@ -904,97 +971,81 @@ def gui():
     global _LOG_SINK
     _LOG_SINK = lambda m: root.after(0, glog, m)
 
-    def set_progress(got, total):
-        root.after(0, lambda: (prog.configure(maximum=total, value=got)))
+    def set_progress(g, t):
+        root.after(0, lambda: prog.configure(maximum=t, value=g))
 
-    # --- populate version lists in background -------------------------------
+    foot = tk.Frame(root, bg=BG)
+    foot.pack(fill="x", padx=20, pady=(8, 18))
+    btn_setup = ttk.Button(foot, text="⟳  Installer / Mettre à jour",
+                           command=lambda: act("setup"))
+    btn_setup.pack(side="left")
+    btn_play = ttk.Button(foot, text="▶    JOUER", style="Accent.TButton",
+                          command=lambda: act("play"))
+    btn_play.pack(side="right")
+
     def refresh_mc():
         try:
             versions["mc"] = list_mc_versions(beta_var.get())
-            vals = [f"{v['tag']}{'  (bêta)' if v['beta'] else ''}"
+            vals = [v["tag"] + ("  · bêta" if v["beta"] else "")
                     for v in versions["mc"]]
-            root.after(0, lambda: mc_cb.configure(values=vals))
-            if vals and not mc_var.get():
-                root.after(0, lambda: mc_var.set(vals[0]))
+
+            def ap():
+                mc_cb.configure(values=vals)
+                if vals and not mc_var.get():
+                    mc_var.set(vals[0])
+            root.after(0, ap)
         except Exception as e:
             _LOG_SINK(f"xx versions MC: {e}")
 
     def refresh_engine():
         versions["proton"] = list_proton_tags() or ["latest"]
-        versions["pp"] = ["auto (selon version MC)"] + list_proxypass_tags()
-        pcb = f2.children["proton"]
-        ppcb = f2.children["pp"]
+        versions["pp"] = ["auto"] + list_proxypass_tags()
 
-        def apply():
-            pcb.configure(values=versions["proton"])
+        def ap():
+            proton_cb.configure(values=versions["proton"])
             proton_var.set(versions["proton"][0])
-            ppcb.configure(values=versions["pp"])
-            pp_var.set("auto (selon version MC)")
-        root.after(0, apply)
+            pp_cb.configure(values=versions["pp"])
+            pp_var.set("auto")
+        root.after(0, ap)
+
     threading.Thread(target=refresh_mc, daemon=True).start()
     threading.Thread(target=refresh_engine, daemon=True).start()
 
-    # --- actions ------------------------------------------------------------
     def collect():
         st = load_settings()
-        st["server"] = {"host": host_var.get().strip(),
+        st["server"] = {"host": host_var.get().strip() or "play.linesia.net",
                         "port": int(port_var.get() or 19132)}
         save_settings(st)
-        mc_ver = None
-        if own.get():
-            use_game_dir(own.get())
-        elif mc_var.get() and versions["mc"]:
-            idx = [f"{v['tag']}{'  (bêta)' if v['beta'] else ''}"
-                   for v in versions["mc"]].index(mc_var.get())
-            mc_ver = versions["mc"][idx]
+        mc = None
+        if not own.get() and mc_var.get() and versions["mc"]:
+            labels = [v["tag"] + ("  · bêta" if v["beta"] else "")
+                      for v in versions["mc"]]
+            mc = versions["mc"][labels.index(mc_var.get())]
         pt = None if proton_var.get() in ("", "latest") else proton_var.get()
-        ppt = None if pp_var.get().startswith("auto") else pp_var.get()
-        return mc_ver, pt, ppt
+        ppt = None if pp_var.get() in ("", "auto") else pp_var.get()
+        return mc, pt, ppt
 
     def busy(on):
         for b in (btn_setup, btn_play):
             b.configure(state="disabled" if on else "normal")
 
-    def do_setup():
+    def act(kind):
         busy(True)
 
-        def w():
+        def work():
             try:
                 mc, pt, ppt = collect()
-                do_setup_inner(mc, pt, ppt)
-                _LOG_SINK("OK Prêt — clique JOUER")
+                do_setup(game_dir=own.get() or None, mc_ver=mc,
+                         proton_tag=pt, pp_tag=ppt, progress=set_progress)
+                if kind == "play":
+                    launch(pp)
+                else:
+                    _LOG_SINK("OK Prêt — clique JOUER")
             except Exception as e:
                 _LOG_SINK(f"xx {e}")
             finally:
                 root.after(0, lambda: busy(False))
-        threading.Thread(target=w, daemon=True).start()
-
-    def do_setup_inner(mc, pt, ppt):
-        do_setup(game_dir=own.get() or None, mc_ver=mc, proton_tag=pt,
-                 pp_tag=ppt, progress=set_progress)
-
-    def do_play():
-        busy(True)
-
-        def w():
-            try:
-                mc, pt, ppt = collect()
-                do_setup_inner(mc, pt, ppt)
-                launch(pp)
-            except Exception as e:
-                _LOG_SINK(f"xx {e}")
-            finally:
-                root.after(0, lambda: busy(False))
-        threading.Thread(target=w, daemon=True).start()
-
-    bar = tk.Frame(root)
-    bar.pack(pady=8)
-    btn_setup = ttk.Button(bar, text="Installer / Mettre à jour", command=do_setup)
-    btn_setup.grid(row=0, column=0, padx=8)
-    btn_play = tk.Button(bar, text="▶  JOUER", command=do_play, bg="#2e7d32",
-                         fg="white", font=("", 12, "bold"), relief="flat",
-                         padx=20, pady=6)
-    btn_play.grid(row=0, column=1, padx=8)
+        threading.Thread(target=work, daemon=True).start()
 
     def on_close():
         pp.stop()
@@ -1047,7 +1098,7 @@ def main():
         elif a.cmd == "config":
             st = load_settings()
             srv = st.setdefault("server",
-                                {"host": "geo.hivebedrock.network", "port": 19132})
+                                {"host": "play.linesia.net", "port": 19132})
             if a.server:
                 h, _, pt = a.server.partition(":")
                 srv.update(host=h, port=int(pt or 19132))
