@@ -47,6 +47,7 @@ rm -rf "$OUT/appimagetool" "$OUT/BedrockOnLinux.AppDir" "$OUT/deb" \
        "$OUT/portable"
 ls "$OUT"/*.deb 2>/dev/null | grep -v "_${VER}_" | xargs -r rm -f
 ls "$OUT"/*.AppImage 2>/dev/null | grep -v "${VER}" | xargs -r rm -f
+ls "$OUT"/*portable.tar.gz 2>/dev/null | grep -v "${VER}" | xargs -r rm -f
 
 echo
 echo "Release artifacts in $OUT :"
