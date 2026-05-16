@@ -36,7 +36,7 @@ from pathlib import Path
 
 APP = "bedrock-on-linux"
 PRETTY = "BedrockOnLinux"
-VERSION = "0.2.1"
+VERSION = "0.3.0"
 
 HOME = Path.home()
 DATA = Path(os.environ.get("BOL_HOME", HOME / ".local/share" / APP))
@@ -563,7 +563,28 @@ def proxypass_signed_in():
     return d.is_dir() and any(d.iterdir())
 
 
+def _pkill(pattern):
+    """Best-effort kill of processes whose cmdline matches `pattern`."""
+    if shutil.which("pkill"):
+        subprocess.run(["pkill", "-9", "-f", pattern],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
+    for pid in os.listdir("/proc"):
+        if not pid.isdigit():
+            continue
+        try:
+            cl = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ")
+            if pattern.encode() in cl:
+                os.kill(int(pid), 9)
+        except Exception:
+            pass
+
+
 class ProxyPass:
+    """Single global instance. Stale ProxyPass processes (from a previous
+    run / repeated clicks) are killed first, otherwise it fails to bind
+    0.0.0.0:19132 (BindException) and multiplayer silently breaks."""
+
     def __init__(self):
         self.proc = None
         self.auth = None        # (url, code)
@@ -575,9 +596,13 @@ class ProxyPass:
     def start(self, on_auth=None, on_online=None):
         if self.running():
             return
+        _pkill("ProxyPass.jar")          # free 19132 from any stale instance
+        time.sleep(1)
         jar = PROXY_DIR / "ProxyPass.jar"
         java = JRE_DIR / "bin/java"
         log = open(LOGS / "proxypass.log", "w")
+        self.auth = None
+        self.online = False
         self.proc = subprocess.Popen(
             [str(java), "-jar", str(jar)], cwd=str(PROXY_DIR),
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
@@ -586,13 +611,16 @@ class ProxyPass:
             for line in self.proc.stdout:
                 log.write(line)
                 log.flush()
+                if re.search(r"Address already in use|Failed to bind", line, re.I):
+                    err("ProxyPass: port 19132 occupé — relais multijoueur KO. "
+                        "Ferme les autres instances et relance.")
                 u = re.search(r"(https?://\S*microsoft\.com/(?:link|devicelogin)\S*)",
                               line, re.I)
-                cwd = re.search(r"\bcode[:\s]+([A-Z0-9]{6,9})\b", line, re.I)
-                if u or cwd:
+                cd = re.search(r"\bcode[:\s]+([A-Z0-9]{6,9})\b", line, re.I)
+                if u or cd:
                     self.auth = (u.group(1) if u else
                                  "https://www.microsoft.com/link",
-                                 cwd.group(1) if cwd else None)
+                                 cd.group(1) if cd else None)
                     if on_auth:
                         on_auth(*self.auth)
                     info(f"Microsoft login → {self.auth[0]}  code {self.auth[1]}")
@@ -611,6 +639,7 @@ class ProxyPass:
                 self.proc.wait(5)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+        _pkill("ProxyPass.jar")
 
 
 # --------------------------------------------------------------------------- #
@@ -727,6 +756,58 @@ def do_setup(game_dir=None, mc_ver=None, proton_tag=None, pp_tag=None,
     ok("Setup complete.")
 
 
+_DIAG_RULES = [
+    (r"Unimplemented function combase\.dll\.RoOriginateError|"
+     r"RoOriginateErrorW", "combase non patché : relance « Installer / Mettre "
+     "à jour » (le patch GDK-Proton n'est pas appliqué)."),
+    (r"NtQueryWnfStateData|Unimplemented function .*aborting",
+     "Un stub Wine a tué le jeu (patch ntdll absent) : relance « Installer / "
+     "Mettre à jour »."),
+    (r"vkGetPhysicalDeviceSurfaceFormatsKHR|Can't open display|x11drv: Can't",
+     "Problème d'affichage (pas de serveur X/Wayland accessible)."),
+    (r"VK_ERROR_DEVICE_LOST|device removed|DXGI_ERROR|vkd3d.*fatal|"
+     r"VK_ERROR_OUT_OF_DEVICE_MEMORY",
+     "Crash GPU/Vulkan : mets à jour ton pilote (Mesa/NVIDIA), baisse les "
+     "graphismes, ou essaie une autre version GDK-Proton."),
+    (r"Cannot allocate memory|OutOfMemory|std::bad_alloc",
+     "Mémoire insuffisante (RAM/VRAM)."),
+    (r"Address already in use|Failed to bind RakNet",
+     "ProxyPass n'a pas pu ouvrir le port 19132 (instance déjà lancée). "
+     "Ferme les autres BedrockOnLinux/ProxyPass."),
+    (r"outdated client|outdated server|getSendSession\(\)\" is null|"
+     r"ProtocolException",
+     "Décalage de version ProxyPass ↔ Minecraft : choisis une autre build "
+     "ProxyPass (ou laisse « auto »)."),
+    (r"Authentication failed|invalid_grant|login.*failed",
+     "Échec de connexion Microsoft : reclique « Se connecter »."),
+]
+
+
+def diagnose():
+    """Scan the game + ProxyPass logs and surface a human cause, if any."""
+    blobs = []
+    for name in ("proton.log", "minecraft.log", "proxypass.log"):
+        p = LOGS / name
+        if p.exists():
+            try:
+                blobs.append(p.read_text(errors="ignore")[-200000:])
+            except Exception:
+                pass
+    text = "\n".join(blobs)
+    hits = []
+    for pat, msg in _DIAG_RULES:
+        if re.search(pat, text, re.I):
+            hits.append(msg)
+    if hits:
+        warn("Cause probable du crash :")
+        for h in dict.fromkeys(hits):
+            warn("  • " + h)
+    else:
+        info("Aucune cause connue détectée. Détail : " + str(LOGS))
+    info(f"Logs complets : {LOGS}")
+    return hits
+
+
 def launch(pp: "ProxyPass" = None):
     s = load_settings()
     gd = s.get("game_dir")
@@ -741,7 +822,10 @@ def launch(pp: "ProxyPass" = None):
     if not pp.running():
         info("Starting ProxyPass (multiplayer relay) …")
         pp.start()
+    _pkill("Minecraft.Windows.exe")          # no stale game instance
     env = proton_env()
+    env["PROTON_LOG"] = "1"                   # so crashes are diagnosable
+    env["PROTON_LOG_DIR"] = str(LOGS)
     if os.environ.get("DISPLAY"):
         env["DISPLAY"] = os.environ["DISPLAY"]
         env.setdefault("XAUTHORITY",
@@ -749,12 +833,19 @@ def launch(pp: "ProxyPass" = None):
     exe = str(CONTENT / "Minecraft.Windows.exe")
     info("Launching Minecraft … (in game: Play ▸ Friends ▸ join the LAN game)")
     glog = open(LOGS / "minecraft.log", "w")
+    rc = None
     try:
-        subprocess.run([sys.executable, str(ensure_umu()), exe], env=env,
-                       cwd=str(CONTENT), stdout=glog, stderr=subprocess.STDOUT)
+        rc = subprocess.run([sys.executable, str(ensure_umu()), exe], env=env,
+                            cwd=str(CONTENT), stdout=glog,
+                            stderr=subprocess.STDOUT).returncode
     finally:
         patch_options()
-        ok("Game closed.")
+        for pat in ("steam-0.log",):           # PROTON_LOG writes here
+            src = LOGS / pat
+            if src.exists():
+                src.replace(LOGS / "proton.log")
+        ok(f"Game closed (exit {rc}).")
+        diagnose()
 
 
 # --------------------------------------------------------------------------- #
@@ -979,6 +1070,10 @@ def gui():
     btn_setup = ttk.Button(foot, text="⟳  Installer / Mettre à jour",
                            command=lambda: act("setup"))
     btn_setup.pack(side="left")
+    ttk.Button(foot, text="🗎  Ouvrir les logs",
+               command=lambda: subprocess.Popen(
+                   ["xdg-open", str(LOGS)], stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL)).pack(side="left", padx=10)
     btn_play = ttk.Button(foot, text="▶    JOUER", style="Accent.TButton",
                           command=lambda: act("play"))
     btn_play.pack(side="right")

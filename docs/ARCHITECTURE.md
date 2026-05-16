@@ -129,6 +129,23 @@ the Wine Wayland driver.
   `Path(__file__).resolve().parent/"data/icon.png"`, so the `/usr/bin` symlink
   must point into `/usr/lib/bedrock-on-linux/`.
 
+## v0.3 — robustness & crash diagnostics
+
+* **ProxyPass single instance**: `_pkill("ProxyPass.jar")` before every start
+  (and on stop). Stacked instances → `BindException: Address already in use`
+  on 0.0.0.0:19132 → dead relay → the joined LAN game points at nothing →
+  disconnect/crash. This was a real, common crash source.
+* **`diagnose()`**: after the game exits, the Proton/ProxyPass logs are
+  scanned against `_DIAG_RULES` (combase/ntdll patch missing, display,
+  GPU/Vulkan device-lost, OOM, ProxyPass bind, protocol mismatch, MS auth)
+  and a human cause is surfaced. `launch()` now sets `PROTON_LOG=1` +
+  `PROTON_LOG_DIR=logs/` and renames `steam-0.log` → `proton.log` so a crash
+  is always analyzable. GUI has an "Ouvrir les logs" button.
+* **Stale game cleanup**: `_pkill("Minecraft.Windows.exe")` before launch.
+* **Release packaging**: `scripts/build-release.sh` → `.deb` + AppImage
+  (`--appimage-extract-and-run`, no FUSE needed) + portable tarball;
+  `RELEASE.md` is the release body. Tag scheme `vX.Y.Z`.
+
 ## Known limits / TODO
 
 * Realms & native in-game Microsoft login: unsupported (WineGDK limit).
