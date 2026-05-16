@@ -2,115 +2,109 @@
 
 # 🟩 BedrockOnLinux
 
-**Minecraft Bedrock (édition Windows / GDK) sur Linux — multijoueur compris.
-Une vraie appli : tu installes, tu choisis ta version, tu joues.**
+**Minecraft Bedrock (Windows / GDK edition) on Linux — multiplayer included.
+A real app: install it, pick your version, play.**
 
 `Ubuntu` · `Debian` · `Linux Mint / LMDE` · `Fedora` · `Arch` · `openSUSE`
 
-![BedrockOnLinux](docs/screenshot.png)
+![BedrockOnLinux](screenshot.png)
 
 </div>
 
 ---
 
-## ✨ Ce que ça fait
+## ✨ What it does
 
-Tout, à ta place, en une appli :
+Everything, for you, in one app:
 
-- 📦 télécharge **GDK‑Proton** et applique les **2 patchs binaires** sans
-  lesquels le jeu ne démarre pas (`combase.RoOriginateErrorW` + tous les
-  *stub funnels* de `ntdll`) ;
-- 🧩 télécharge **umu‑launcher** (Steam Linux Runtime → marche sur toutes
-  les distros), un **Java 25** embarqué et la **bonne build de ProxyPass** ;
-- 🌐 lance **ProxyPass en arrière‑plan** pour le multijoueur (WineGDK n'a pas
-  de login Microsoft *dans* le jeu — ProxyPass authentifie en dehors) ;
-- 🎮 prépare le prefix Wine, curl/SSL, GameInput, `options.txt`, puis lance
-  le jeu.
+- 📦 downloads **GDK-Proton** and applies the **2 binary patches** without
+  which the game won't start (`combase.RoOriginateErrorW` + all of `ntdll`'s
+  unimplemented-stub funnels);
+- 🧩 downloads **umu-launcher** (Steam Linux Runtime → works on every distro),
+  a bundled **Java 25**, and the **right ProxyPass build**;
+- 🌐 runs **ProxyPass in the background** for multiplayer (WineGDK has no
+  in-game Microsoft login — ProxyPass authenticates outside Wine);
+- 🎮 sets up the Wine prefix, curl/SSL, GameInput, `options.txt`, then
+  launches the game.
 
-Tu choisis la **version Minecraft** (stable ou bêta), tu te **connectes à
-Microsoft** (le code s'affiche dans l'appli), tu mets l'**IP du serveur**,
-tu cliques **JOUER**.
+You pick the **Minecraft version** (stable or beta), **sign in to Microsoft**
+(the code is shown in the app), set the **server IP**, click **Play**.
 
-## ⬇️ Installer
+## ⬇️ Install
 
 ### Debian / Ubuntu / Mint — `.deb`
 
 ```bash
 sudo apt install ./bedrock-on-linux_*_all.deb
 ```
-Apt installe les dépendances tout seul. **BedrockOnLinux apparaît dans le
-menu / la recherche** avec son icône.
+Apt pulls the dependencies. **BedrockOnLinux then shows up in your menu /
+search** with its icon.
 
-### Toutes distros — `AppImage`
+### Any distro — `AppImage`
 
 ```bash
-chmod +x BedrockOnLinux-x86_64.AppImage
-./BedrockOnLinux-x86_64.AppImage
+chmod +x BedrockOnLinux-*-x86_64.AppImage
+./BedrockOnLinux-*-x86_64.AppImage
 ```
 
-### Portable / autres distros — archive
+### Portable — tarball
 
 ```bash
-tar xzf bedrock-on-linux-portable.tar.gz && cd bedrock-on-linux
-./bedrock-on-linux gui          # ou: ./bedrock-on-linux doctor
+tar xzf bedrock-on-linux-*-portable.tar.gz && cd bedrock-on-linux
+./bedrock-on-linux gui          # or: ./bedrock-on-linux doctor
 ```
 
-> Prérequis (présents quasi partout) : `python3`, `python3-tk`, `tar`,
-> `bubblewrap`, `zstd`. `bedrock-on-linux doctor` te dit ce qui manque et
-> la commande pour l'installer.
+> Requirements (present almost everywhere): `python3`, `python3-tk`, `tar`,
+> `bubblewrap`, `zstd`. `bedrock-on-linux doctor` tells you what's missing
+> and the exact command to install it.
 
-## ▶️ Jouer
+## ▶️ Play
 
-1. Ouvre **BedrockOnLinux**.
-2. **① Version** : choisis (ex. `1.26.21.1`) — téléchargée pour toi.
-3. **④ Compte Microsoft** → *Se connecter* : ouvre le lien affiché, entre
-   le code, connecte le compte **qui possède Minecraft**.
-4. **③ Serveur** : l'IP par défaut est `play.linesia.net` (modifiable).
-5. **Installer / Mettre à jour**, puis **▶ JOUER**.
-6. En jeu : **Jouer ▸ onglet Amis ▸ rejoins la partie LAN**
-   *(le bouton « Ajouter un serveur » est grisé sous WineGDK : c'est normal,
-   on passe par le LAN — ProxyPass fait le pont vers ton serveur).*
+1. Open **BedrockOnLinux**.
+2. **① Version**: pick one (e.g. `1.26.21.1`) — downloaded for you.
+3. **④ Microsoft account** → *Sign in*: open the shown link, enter the code,
+   sign in with the account that **owns Minecraft**.
+4. **③ Server**: default IP is `play.linesia.net` (editable).
+5. **Install / Update**, then **▶ Play**.
+6. In game: **Play ▸ Friends tab ▸ join the LAN game**
+   *(the "Add server" button is greyed out under WineGDK — that's expected;
+   we go through LAN, ProxyPass bridges to your server).*
 
-## 🩺 En cas de crash
+## 🩺 If it crashes
 
-L'appli **diagnostique automatiquement** : à la fermeture du jeu, la cause
-probable s'affiche dans le journal (port occupé, GPU/Vulkan, version
-ProxyPass, etc.). Bouton **🗎 Ouvrir les logs** pour tout voir
-(`~/.local/share/bedrock-on-linux/logs/`). Cause fréquente déjà gérée :
-plusieurs ProxyPass empilés → l'appli tue désormais les instances mortes
-avant de relancer.
+The app **diagnoses automatically**: when the game exits, the likely cause
+is printed in the log (port in use, GPU/Vulkan, ProxyPass version, missing
+patch, …). Use **🗎 Open logs** to see everything
+(`~/.local/share/bedrock-on-linux/logs/`). A common, already-handled cause:
+stacked ProxyPass instances — the app now kills dead ones before relaunching.
 
-## 🧑‍💻 En ligne de commande
+## 🧑‍💻 Command line
 
 ```bash
-bedrock-on-linux versions                 # versions Minecraft dispo
-bedrock-on-linux setup --mc 1.26.21.1     # installe cette version + tout
+bedrock-on-linux versions                 # available Minecraft versions
+bedrock-on-linux setup --mc 1.26.21.1     # install that version + everything
 bedrock-on-linux config --server play.linesia.net:19132
 bedrock-on-linux play
 bedrock-on-linux doctor
 ```
 
-## ⚖️ Légal
+## ⚖️ Legal
 
-BedrockOnLinux **ne distribue aucun fichier Minecraft** : c'est un **lanceur
-de compatibilité** (comme Heroic / mcpelauncher). Les fichiers de jeu
-viennent d'une **source choisie par toi** (par défaut l'archive
-communautaire
+BedrockOnLinux **ships no Minecraft files**: it is a **compatibility
+launcher** (like Heroic / mcpelauncher). Game files come from a
+**source you choose** (default: the community archive
 [`bubbles-wow/mcbe-gdk-unpack-archive`](https://github.com/bubbles-wow/mcbe-gdk-unpack-archive))
-ou de ton propre dossier — tu dois posséder Minecraft. GDK‑Proton,
-umu‑launcher, ProxyPass et Temurin sont libres, sous leurs licences
-respectives. Realms / login Microsoft *natif dans le jeu* : non supportés
-(limite WineGDK ; le multi serveurs passe par ProxyPass).
+or your own folder — you must own Minecraft. GDK-Proton, umu-launcher,
+ProxyPass and Temurin are free software under their own licenses. Realms and
+the *in-game* native Microsoft login are not supported (WineGDK limitation;
+server multiplayer goes through ProxyPass).
 
-## 🛠️ Construire les paquets
+## 🛠️ Build the packages
 
 ```bash
-scripts/build-release.sh        # .deb + AppImage + tar.gz portable dans dist/
+scripts/build-release.sh        # .deb + AppImage + portable tar.gz in dist/
 ```
 
-Détails techniques (offsets des patchs, pourquoi) :
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+## 📄 License
 
-## 📄 Licence
-
-MIT — voir [`LICENSE`](LICENSE).
+MIT — see [`LICENSE`](LICENSE).

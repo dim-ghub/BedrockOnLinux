@@ -1,22 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-#
-# BedrockOnLinux — install & run Minecraft Bedrock (Windows GDK build) on any
-# Linux. One app, everything bundled. CLI + graphical launcher.
-#
+# BedrockOnLinux — install & run Minecraft Bedrock (Windows GDK) on Linux.
+# One app: GDK-Proton (auto-patched) + umu + ProxyPass + bundled Java.
 # SPDX-License-Identifier: MIT
-#
-# The launcher lets you, before playing:
-#   * pick & download the Minecraft version (stable or beta),
-#   * pick the GDK-Proton version (auto-patched so the game runs),
-#   * pick / auto-match the ProxyPass build,
-#   * sign in to Microsoft (device code surfaced in the UI),
-#   * set the server IP/port to connect to (ProxyPass relay),
-# then Play. ProxyPass runs in the background; in game you join the LAN game
-# under the Friends tab (WineGDK has no in-game Microsoft login).
-#
-# It does not ship Minecraft. Game files come from a user-chosen source
-# (default: the community mcbe-gdk-unpack-archive) or your own folder.
 
 import argparse
 import json
@@ -63,9 +49,6 @@ IS_TTY = sys.stdout.isatty()
 _LOG_SINK = None       # GUI hook: callable(str)
 
 
-# --------------------------------------------------------------------------- #
-#  logging helpers (route to GUI when present)
-# --------------------------------------------------------------------------- #
 def _emit(tag, m):
     line = f"{tag} {m}"
     if _LOG_SINK:
@@ -115,9 +98,6 @@ def save_settings(s):
     SETTINGS.write_text(json.dumps(s, indent=2))
 
 
-# --------------------------------------------------------------------------- #
-#  HTTP
-# --------------------------------------------------------------------------- #
 def http_json(url):
     req = urllib.request.Request(
         url, headers={"User-Agent": APP, "Accept": "application/vnd.github+json"})
@@ -172,9 +152,6 @@ def asset_url(release, predicate):
     return None, None, 0
 
 
-# --------------------------------------------------------------------------- #
-#  minimal PE reader — RVA/offset maps + exports (PE32+/x64), pure stdlib
-# --------------------------------------------------------------------------- #
 class PE:
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -251,9 +228,6 @@ def apply_patch(path: Path, off, expect, new, what):
     return True
 
 
-# --------------------------------------------------------------------------- #
-#  GDK-Proton (download + the two essential patches)
-# --------------------------------------------------------------------------- #
 def proton_path():
     p = load_settings().get("proton")
     return Path(p) if p else None
@@ -347,9 +321,6 @@ def patch_proton(root: Path):
         die("ntdll: no stub funnel matched — Proton layout changed.")
 
 
-# --------------------------------------------------------------------------- #
-#  umu-launcher  /  bundled Java 25
-# --------------------------------------------------------------------------- #
 def ensure_umu(force=False):
     binp = UMU_DIR / "umu-run"
     if binp.exists() and not force:
@@ -400,9 +371,6 @@ def ensure_jre(force=False):
     return j
 
 
-# --------------------------------------------------------------------------- #
-#  Minecraft version archive (user-chosen source) + own-folder option
-# --------------------------------------------------------------------------- #
 def list_mc_versions(include_beta=True):
     out = []
     for r in gh_releases(GAME_ARCHIVE_REPO, 60):
@@ -466,9 +434,6 @@ def mc_version_str(game_dir: Path):
     return None
 
 
-# --------------------------------------------------------------------------- #
-#  ProxyPass (build matched to the Minecraft version)
-# --------------------------------------------------------------------------- #
 def _vt(v):
     try:
         return tuple(int(x) for x in v.split("."))
@@ -642,9 +607,6 @@ class ProxyPass:
         _pkill("ProxyPass.jar")
 
 
-# --------------------------------------------------------------------------- #
-#  prefix / curl-SSL / GameInput / options.txt / launch
-# --------------------------------------------------------------------------- #
 def proton_env():
     env = dict(os.environ)
     env.update({"GAMEID": "0", "PROTONPATH": str(proton_path()),
@@ -848,9 +810,6 @@ def launch(pp: "ProxyPass" = None):
         diagnose()
 
 
-# --------------------------------------------------------------------------- #
-#  doctor
-# --------------------------------------------------------------------------- #
 def doctor():
     info(f"{PRETTY} {VERSION} — host check")
     hint = next((h for pm, h in (
@@ -878,9 +837,6 @@ def doctor():
     return True
 
 
-# --------------------------------------------------------------------------- #
-#  GUI
-# --------------------------------------------------------------------------- #
 def gui():
     try:
         import tkinter as tk
@@ -1149,9 +1105,6 @@ def gui():
     root.mainloop()
 
 
-# --------------------------------------------------------------------------- #
-#  CLI
-# --------------------------------------------------------------------------- #
 def main():
     p = argparse.ArgumentParser(prog=APP, description=f"{PRETTY} {VERSION}")
     sub = p.add_subparsers(dest="cmd")
