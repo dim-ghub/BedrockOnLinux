@@ -53,18 +53,18 @@ tar xzf bedrock-on-linux-*-portable.tar.gz && cd bedrock-on-linux
 ## Play
 
 1. Open **BedrockOnLinux**.
-2. **① Version** — pick one (downloaded for you).
-3. **④ Compte Microsoft** → *Se connecter*: open the shown link, enter the
+2. **① Minecraft version** — pick one (downloaded for you).
+3. **④ Microsoft account** → *Sign in*: open the shown link, enter the
    code, sign in with the account that owns Minecraft.
-4. **③ Serveur** — set the destination IP.
-5. **Installer / Mettre à jour**, then **▶ JOUER**.
-6. In game: **Jouer ▸ onglet « Mondes » ▸ « BedrockOnLinux »**.
+4. **③ Multiplayer server** — set the destination IP.
+5. **Install / Update**, then **▶ PLAY**.
+6. In game: **Play ▸ Worlds tab ▸ "ProxyPass"**.
 
 ## If something fails
 
-On exit the app prints a likely cause. Use **🗎 Ouvrir les logs**
-(`~/.local/share/bedrock-on-linux/logs/`) or **🔌 Logs ProxyPass** for the
-live relay log. **🛠 Réparer** rebuilds a broken Wine prefix.
+On exit the app prints a likely cause. Use **🗎 Open logs**
+(`~/.local/share/bedrock-on-linux/logs/`) or **🔌 ProxyPass logs** for the
+live relay log. **🛠 Repair** rebuilds a broken Wine prefix.
 
 ## Command line
 
