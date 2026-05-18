@@ -15,6 +15,7 @@ import sys
 import tarfile
 import threading
 import time
+import urllib.parse
 import urllib.request
 import urllib.error
 import zipfile
@@ -36,6 +37,7 @@ GAMES = DATA / "games"
 CONTENT = DATA / "content"
 CACHE = DATA / "cache"
 LOGS = DATA / "logs"
+MSA_DIR = DATA / "msa"                 # native (no-ProxyPass) login token
 SETTINGS = DATA / "settings.json"
 
 GDK_PROTON_REPO = "Weather-OS/GDK-Proton"
@@ -45,6 +47,18 @@ GAME_ARCHIVE_REPO = "bubbles-wow/mcbe-gdk-unpack-archive"
 MINGW_CURL = "https://mirror.msys2.org/mingw/mingw64/mingw-w64-x86_64-curl-8.17.0-1-any.pkg.tar.zst"
 CACERT_URL = "https://curl.se/ca/cacert.pem"
 TEMURIN_JRE25 = "https://api.adoptium.net/v3/binary/latest/25/ga/linux/x64/jre/hotspot/normal/eclipse"
+
+# Native in-game login (no ProxyPass). WineGDK's XUser (Weather-OS/WineGDK
+# PR #33) has no sign-in UI: it reads an MSA OAuth refresh token from the
+# prefix registry and does the Xbox Live exchange itself. We only run the
+# device-code flow (pure urllib, no crypto) and seed that token. The
+# client_id MUST equal WineGDK's hardcoded msaAppId or its refresh is
+# rejected. See docs/native-login.md.
+MSA_CLIENT_ID = "0000000040159362"     # Bedrock Win32 (== gophertunnel Win32Config)
+MSA_SCOPE = "service::user.auth.xboxlive.com::MBI_SSL"
+MSA_CONNECT = "https://login.live.com/oauth20_connect.srf"
+MSA_TOKEN = "https://login.live.com/oauth20_token.srf"
+WINEGDK_REG = r"Software\Wine\WineGDK"  # value RefreshToken (REG_SZ)
 
 IS_TTY = sys.stdout.isatty()
 _LOG_SINK = None       # GUI hook: callable(str)
@@ -105,6 +119,24 @@ def http_json(url):
         url, headers={"User-Agent": APP, "Accept": "application/vnd.github+json"})
     with urllib.request.urlopen(req, timeout=30) as r:
         return json.loads(r.read().decode())
+
+
+def http_post_form(url, fields):
+    """POST application/x-www-form-urlencoded → parsed JSON. OAuth endpoints
+    return their error payload with a 4xx, so decode the body either way."""
+    data = urllib.parse.urlencode(fields).encode()
+    req = urllib.request.Request(
+        url, data=data, method="POST",
+        headers={"User-Agent": APP, "Accept": "application/json",
+                 "Content-Type": "application/x-www-form-urlencoded"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.loads(r.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            return json.loads(e.read().decode())
+        except Exception:
+            raise
 
 
 def download(url, dest: Path, label=None, progress=None):
@@ -659,6 +691,158 @@ class ProxyPass:
         _pkill("ProxyPass.jar")
 
 
+# ---------------------------------------------------------------------------
+# Native in-game login (no ProxyPass) — see docs/native-login.md
+# ---------------------------------------------------------------------------
+
+def msa_load():
+    f = MSA_DIR / "token.json"
+    if f.is_file():
+        try:
+            return json.loads(f.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def msa_save(tok):
+    MSA_DIR.mkdir(parents=True, exist_ok=True)
+    p = MSA_DIR / "token.json"
+    p.write_text(json.dumps(tok, indent=2))
+    try:
+        os.chmod(p, 0o600)
+    except Exception:
+        pass
+
+
+def msa_signed_in():
+    return bool(msa_load().get("refresh_token"))
+
+
+def msa_logout():
+    try:
+        (MSA_DIR / "token.json").unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def msa_refresh(refresh_token):
+    """Trade a refresh token for a fresh one (same shape WineGDK's XUser uses
+    internally). Returns the token dict, or None if it was rejected."""
+    t = http_post_form(MSA_TOKEN, {
+        "client_id": MSA_CLIENT_ID, "scope": MSA_SCOPE,
+        "grant_type": "refresh_token", "refresh_token": refresh_token})
+    return t if t.get("refresh_token") else None
+
+
+def account_signed_in(native):
+    return msa_signed_in() if native else proxypass_signed_in()
+
+
+class NativeAuth:
+    """MSA device-code login for the no-ProxyPass path. We only obtain an
+    OAuth refresh token; WineGDK's XUser reads it from the prefix registry
+    and performs the Xbox Live / XSTS exchange itself. GUI-compatible with
+    ProxyPass (`.auth`, `.start`, `.stop`, `.running`)."""
+
+    def __init__(self):
+        self.auth = None        # (url, code)
+        self.online = False
+        self.proc = None        # GUI compatibility (no subprocess here)
+        self.dest = None
+        self._stop = False
+
+    def running(self):
+        return False
+
+    def signed_in(self):
+        return msa_signed_in()
+
+    def start(self, on_auth=None, on_online=None, dest=None):
+        if msa_signed_in():
+            self.online = True
+            if on_online:
+                on_online()
+            ok("Microsoft account already linked (in-game login)")
+            return
+        self._stop = False
+        threading.Thread(target=self._flow, args=(on_auth, on_online),
+                          daemon=True).start()
+
+    def _flow(self, on_auth, on_online):
+        try:
+            d = http_post_form(MSA_CONNECT, {
+                "client_id": MSA_CLIENT_ID, "scope": MSA_SCOPE,
+                "response_type": "device_code"})
+            if "device_code" not in d:
+                die("Microsoft device-code request failed: "
+                    f"{d.get('error_description') or d.get('error') or d}")
+            url = d.get("verification_uri") or "https://www.microsoft.com/link"
+            code = d.get("user_code")
+            self.auth = (url, code)
+            if on_auth:
+                on_auth(url, code)
+            info(f"Microsoft sign-in → {url} code {code}")
+            interval = max(int(d.get("interval", 5) or 5), 1)
+            deadline = time.time() + int(d.get("expires_in", 900) or 900)
+            dc = d["device_code"]
+            while not self._stop and time.time() < deadline:
+                time.sleep(interval)
+                # Legacy live.com grant string — matches WineGDK XUser.c.
+                t = http_post_form(MSA_TOKEN, {
+                    "client_id": MSA_CLIENT_ID,
+                    "grant_type": "device_code", "device_code": dc})
+                e = t.get("error")
+                if e == "authorization_pending":
+                    continue
+                if e == "slow_down":
+                    interval += 5
+                    continue
+                if e:
+                    die(f"Microsoft sign-in failed: "
+                        f"{t.get('error_description') or e}")
+                if t.get("refresh_token"):
+                    msa_save({"refresh_token": t["refresh_token"],
+                              "obtained": int(time.time())})
+                    self.auth = None
+                    self.online = True
+                    if on_online:
+                        on_online()
+                    ok("Microsoft account linked (in-game login)")
+                    return
+            if not self._stop:
+                warn("Microsoft sign-in timed out — click 'Sign in' again.")
+        except BolError:
+            pass
+        except Exception as ex:
+            err(f"Native login error: {ex}")
+
+    def stop(self):
+        self._stop = True
+
+
+def wine_reg_set_refresh_token(token):
+    """Seed the MSA refresh token where WineGDK's XUser (PR #33) reads it:
+    HKLM\\Software\\Wine\\WineGDK 'RefreshToken'. Written through the same
+    proton/umu runtime (and prefix) used to launch the game."""
+    cmd, env = proton_umu_cmd("reg")
+    cmd += ["add", "HKLM\\" + WINEGDK_REG, "/v", "RefreshToken",
+            "/t", "REG_SZ", "/d", token, "/f"]
+    LOGS.mkdir(parents=True, exist_ok=True)
+    log = open(LOGS / "native-login.log", "w")
+    try:
+        rc = subprocess.run(cmd, env=env, stdout=log,
+                            stderr=subprocess.STDOUT, timeout=120).returncode
+    except Exception as e:
+        warn(f"Could not write WineGDK RefreshToken: {e}")
+        return False
+    if rc == 0:
+        ok("In-game login token written to the Wine prefix")
+        return True
+    warn(f"reg add returned {rc} — see logs/native-login.log")
+    return False
+
+
 def ensure_umu(force=False):
     binp = UMU_DIR / "umu-run"
     if binp.exists() and not force:
@@ -904,29 +1088,48 @@ def launch(pp: "ProxyPass" = None):
         die("GDK-Proton missing — re-run setup.")
     patch_proton(proton_path())
 
-    # Warn only if a version-locked pre/<ver> ProxyPass is older than MC.
-    mc_ver = mc_version_str(Path(gd))
-    pp_tag = s.get("proxypass_tag", "") or ""
-    m = re.match(r"pre/(\d+\.\d+\.\d+)-\d+$", pp_tag)
-    if mc_ver and m and _vt(mc_ver) > _vt(m.group(1)):
-        warn(f"ProxyPass {pp_tag} only supports MC {m.group(1)} (you are on "
-             f"{mc_ver}) — choose a 'master-…' build.")
-
-    dest = (s["server"]["host"], int(s["server"]["port"]))
-    proxypass_config(*dest)
-    if pp is None:
-        pp = ProxyPass()
-    # The relay reads config.yml only at startup → restart it if the
-    # chosen server changed.
-    if pp.running() and pp.dest != dest:
-        info(f"Server changed → restarting the relay ({dest})")
-        pp.stop()
-        time.sleep(1)
-    if not pp.running():
-        info("Starting the relay …")
-        pp.start(dest=dest)
+    native = bool(s.get("native_login"))
+    if native:
+        tok = msa_load().get("refresh_token")
+        if not tok:
+            die("In-game login is enabled but no Microsoft account is "
+                "linked — click 'Sign in' first.")
+        info("In-game login mode — ProxyPass disabled.")
+        try:
+            fresh = msa_refresh(tok)
+        except Exception as e:
+            fresh = None
+            warn(f"Token refresh skipped ({e}) — using cached token.")
+        if fresh:
+            msa_save({"refresh_token": fresh["refresh_token"],
+                      "obtained": int(time.time())})
+            tok = fresh["refresh_token"]
+        wine_reg_set_refresh_token(tok)
+        warn("Needs a GDK-Proton with WineGDK XUser (PR #33). Sign-in and "
+             "server join happen inside Minecraft (no LAN relay).")
     else:
-        info(f"Relay already active → {dest[0]}:{dest[1]}")
+        # Warn only if a version-locked pre/<ver> ProxyPass is older than MC.
+        mc_ver = mc_version_str(Path(gd))
+        pp_tag = s.get("proxypass_tag", "") or ""
+        m = re.match(r"pre/(\d+\.\d+\.\d+)-\d+$", pp_tag)
+        if mc_ver and m and _vt(mc_ver) > _vt(m.group(1)):
+            warn(f"ProxyPass {pp_tag} only supports MC {m.group(1)} (you are "
+                 f"on {mc_ver}) — choose a 'master-…' build.")
+        dest = (s["server"]["host"], int(s["server"]["port"]))
+        proxypass_config(*dest)
+        if pp is None:
+            pp = ProxyPass()
+        # The relay reads config.yml only at startup → restart it if the
+        # chosen server changed.
+        if pp.running() and pp.dest != dest:
+            info(f"Server changed → restarting the relay ({dest})")
+            pp.stop()
+            time.sleep(1)
+        if not pp.running():
+            info("Starting the relay …")
+            pp.start(dest=dest)
+        else:
+            info(f"Relay already active → {dest[0]}:{dest[1]}")
     kill_wine()
     exe = str(CONTENT / "Minecraft.Windows.exe")
     cmd, env = proton_umu_cmd(exe)
@@ -951,8 +1154,12 @@ def launch(pp: "ProxyPass" = None):
                     pass
     elif os.environ.get("WAYLAND_DISPLAY"):
         warn("Wayland session without X DISPLAY — install XWayland.")
-    info("Launching Minecraft … In game: Play ▸ Worlds ▸ the "
-         "LAN world 'ProxyPass'.")
+    if native:
+        info("Launching Minecraft … Sign in with Microsoft, then add and "
+             "join your server in-game (Play ▸ Servers).")
+    else:
+        info("Launching Minecraft … In game: Play ▸ Worlds ▸ the "
+             "LAN world 'ProxyPass'.")
     glog = open(LOGS / "minecraft.log", "w")
     rc = None
     try:
@@ -1053,6 +1260,7 @@ def gui():
     root.option_add("*TCombobox*Listbox.selectBackground", ACC)
 
     pp = ProxyPass()
+    na = NativeAuth()
     versions = {"mc": [], "proton": [], "pp": []}
 
     head = tk.Frame(root, bg=BG)
@@ -1139,6 +1347,24 @@ def gui():
     tk.Label(cm, textvariable=ms_code, bg=CARD, fg="#e0b341"
              ).grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
+    native_var = tk.BooleanVar(value=bool(s.get("native_login")))
+
+    def cur_auth():
+        return na if native_var.get() else pp
+
+    def toggle_native():
+        st = load_settings()
+        st["native_login"] = bool(native_var.get())
+        save_settings(st)
+        (pp if native_var.get() else na).stop()
+        set_phase("in" if account_signed_in(native_var.get()) else "out")
+
+    ttk.Checkbutton(
+        cm, text="In-game login — no ProxyPass (experimental, needs a "
+        "GDK-Proton with WineGDK XUser)", variable=native_var,
+        command=toggle_native).grid(row=2, column=0, columnspan=4,
+                                    sticky="w", pady=(8, 0))
+
     # phase: "in" (signed in) / "auth" (enter code) / "out" (signed out)
     def set_phase(ph):
         if ph == "in":
@@ -1173,31 +1399,42 @@ def gui():
         root.after(0, lambda: set_phase("in"))
 
     def open_link():
-        if pp.auth:
-            subprocess.Popen(["xdg-open", pp.auth[0]],
+        a = cur_auth()
+        if a.auth:
+            subprocess.Popen(["xdg-open", a.auth[0]],
                              stdout=subprocess.DEVNULL,
                              stderr=subprocess.DEVNULL)
 
     def copy_code():
-        if pp.auth and pp.auth[1]:
+        a = cur_auth()
+        if a.auth and a.auth[1]:
             root.clipboard_clear()
-            root.clipboard_append(pp.auth[1])
+            root.clipboard_append(a.auth[1])
 
     def do_logout():
-        for n in ("auth.json", "data"):
-            p = PROXY_DIR / n
-            try:
-                shutil.rmtree(p) if p.is_dir() else p.unlink(missing_ok=True)
-            except Exception:
-                pass
-        pp.stop()
+        if native_var.get():
+            msa_logout()
+            na.stop()
+        else:
+            for n in ("auth.json", "data"):
+                p = PROXY_DIR / n
+                try:
+                    shutil.rmtree(p) if p.is_dir() \
+                        else p.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            pp.stop()
         set_phase("out")
+
+    def _do_login():
+        a = cur_auth()
+        if a is pp:
+            ensure_jre()
+        a.start(on_auth, on_online)
 
     b_login = ttk.Button(cm, text="Sign in",
                          command=lambda: threading.Thread(
-                             target=lambda: (ensure_jre(),
-                                             pp.start(on_auth, on_online)),
-                             daemon=True).start())
+                             target=_do_login, daemon=True).start())
     b_login.grid(row=0, column=1, padx=6)
     b_link = ttk.Button(cm, text="Open link", command=open_link)
     b_link.grid(row=0, column=2, padx=6)
@@ -1205,7 +1442,7 @@ def gui():
     b_code.grid(row=0, column=3, padx=6)
     b_logout = ttk.Button(cm, text="Sign out", command=do_logout)
     b_logout.grid(row=0, column=1, padx=6)
-    set_phase("in" if proxypass_signed_in() else "out")
+    set_phase("in" if account_signed_in(native_var.get()) else "out")
 
     prog = ttk.Progressbar(root, style="Bar.Horizontal.TProgressbar",
                            mode="determinate")
@@ -1326,6 +1563,7 @@ def gui():
         st = load_settings()
         st["server"] = {"host": host_var.get().strip() or "play.linesia.net",
                         "port": int(port_var.get() or 19132)}
+        st["native_login"] = bool(native_var.get())
         save_settings(st)
         mc = None
         if not own.get() and mc_var.get() and versions["mc"]:
@@ -1362,6 +1600,7 @@ def gui():
 
     def on_close():
         pp.stop()
+        na.stop()
         root.destroy()
     root.protocol("WM_DELETE_WINDOW", on_close)
     root.mainloop()
@@ -1385,6 +1624,9 @@ def main():
     lv.add_argument("--beta", action="store_true")
     cf = sub.add_parser("config", help="show/set settings")
     cf.add_argument("--server", help="destination server  host:port")
+    cf.add_argument("--native-login", choices=["on", "off"],
+                    help="in-game Microsoft login (no ProxyPass, experimental)")
+    sub.add_parser("login", help="link a Microsoft account (in-game login mode)")
     sub.add_parser("doctor", help="check host requirements")
     sub.add_parser("repair", help="reset a broken Wine prefix")
     sub.add_parser("gui", help="graphical launcher")
@@ -1410,14 +1652,32 @@ def main():
             st = load_settings()
             srv = st.setdefault("server",
                                 {"host": "play.linesia.net", "port": 19132})
+            touched = False
             if a.server:
                 h, _, pt = a.server.partition(":")
                 srv.update(host=h, port=int(pt or 19132))
                 save_settings(st)
                 proxypass_config(srv["host"], srv["port"])
                 ok(f"Server = {srv['host']}:{srv['port']}")
-            else:
+                touched = True
+            if a.native_login:
+                st["native_login"] = (a.native_login == "on")
+                save_settings(st)
+                ok(f"In-game login (no ProxyPass) = {a.native_login}")
+                touched = True
+            if not touched:
                 print(json.dumps(st, indent=2))
+        elif a.cmd == "login":
+            if not load_settings().get("native_login"):
+                die("Enable it first:  "
+                    f"{APP} config --native-login on")
+            na = NativeAuth()
+            if na.signed_in():
+                ok("A Microsoft account is already linked.")
+            else:
+                na._flow(None, None)
+                if not na.signed_in():
+                    sys.exit(1)
         elif a.cmd == "doctor":
             sys.exit(0 if doctor() else 1)
         elif a.cmd == "repair":

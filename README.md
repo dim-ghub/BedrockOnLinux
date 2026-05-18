@@ -60,6 +60,23 @@ tar xzf bedrock-on-linux-*-portable.tar.gz && cd bedrock-on-linux
 5. **Install / Update**, then **▶ PLAY**.
 6. In game: **Play ▸ Worlds tab ▸ "ProxyPass"**.
 
+## Experimental: in-game login (no ProxyPass)
+
+This branch can sign in **inside** Minecraft instead of relaying through
+ProxyPass — the game then joins servers itself (real online play). It only
+works on a GDK-Proton build that includes the WineGDK `XUser` implementation
+(upstream WIP); otherwise keep the default ProxyPass path. Opt in:
+
+```bash
+bedrock-on-linux config --native-login on
+bedrock-on-linux login          # link your Microsoft account
+bedrock-on-linux play           # then join your server in-game (Play ▸ Servers)
+```
+
+In the GUI it's the *"In-game login — no ProxyPass"* checkbox in card ④.
+Default behaviour is unchanged. Design and the exact upstream contract:
+[`docs/native-login.md`](docs/native-login.md).
+
 ## If something fails
 
 On exit the app prints a likely cause. Use **🗎 Open logs**
@@ -72,6 +89,7 @@ live relay log. **🛠 Repair** rebuilds a broken Wine prefix.
 bedrock-on-linux versions
 bedrock-on-linux setup --mc 1.26.21.1
 bedrock-on-linux config --server play.linesia.net:19132
+bedrock-on-linux config --native-login on   # experimental, see above
 bedrock-on-linux play
 bedrock-on-linux doctor
 ```
