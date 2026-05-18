@@ -1089,8 +1089,9 @@ def launch(_pp=None):
     env["PROTON_LOG"] = "1"
     env["PROTON_LOG_DIR"] = str(LOGS)
     # Trace the WineGDK XUser channel (gdkc) so sign-in / token / signature
-    # behaviour shows up in proton.log for diagnosis.
-    env.setdefault("WINEDEBUG", "+gdkc")
+    # behaviour shows up in proton.log for diagnosis (force unless the user
+    # set WINEDEBUG in the real environment).
+    env["WINEDEBUG"] = os.environ.get("WINEDEBUG") or "+gdkc,fixme+all"
     disp = os.environ.get("DISPLAY")
     if disp:
         env["DISPLAY"] = disp
