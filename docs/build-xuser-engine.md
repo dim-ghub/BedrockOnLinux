@@ -27,7 +27,32 @@ Licensing: WineGDK's `xgameruntime` code is declared **CC0 / public domain**
 by the maintainer (the rest of Wine stays LGPL). You may freely fork, derive
 and redistribute the `xgameruntime` parts.
 
-## Assembly plan for a controlled fork
+## Already assembled: `Wyze3306/WineGDK` branch `xuser-login`
+
+Done in this project: `Wyze3306/WineGDK` branch **`xuser-login`** =
+`olivi-r/master` (XUser, PR #33 — the actual Microsoft sign-in) **+**
+XLauncher (PR #37) integrated on top (matches PR #37's commit, adapted to
+the XUser layout). Cloned locally at `~/Bureau/WineGDK`.
+
+It still has the **signature gap** below (upstream `signature = NULL`,
+RPS auth with no proof key). Core sign-in and server join use the
+`XBL3.0` token and should work; signed Xbox endpoints (some
+profile/marketplace) need step 3.
+
+### Build & use it
+
+```bash
+scripts/build-winegdk-proton.sh        # builds ~/Bureau/WineGDK + overlays
+                                       # onto a copy of the stock GDK-Proton
+bedrock-on-linux config --proton-dir ~/.local/share/bedrock-on-linux/proton/GDK-Proton-xuser
+bedrock-on-linux config --native-login on && bedrock-on-linux login && bedrock-on-linux play
+```
+
+The script automates the mechanical steps but the Wine build + GDK-Proton
+overlay is **not verified by this repo** — test in-game. A full Wine build
+needs `flex bison gcc x86_64-w64-mingw32-gcc` + Wine build-deps.
+
+## Assembly plan (if redoing from scratch)
 
 1. Fork `Weather-OS/WineGDK`.
 2. Merge **PR #33** (`olivi-r:master` — XUser) and **PR #37**
