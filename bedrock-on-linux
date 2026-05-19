@@ -60,7 +60,11 @@ WINEGDK_REG = r"Software\Wine\WineGDK"  # value RefreshToken (REG_SZ)
 # Microsoft login works in-game. Source is cloned/updated here and built;
 # the result is overlaid onto a stock GDK-Proton. See docs/build-xuser-engine.md.
 WINEGDK_REPO = "https://github.com/Wyze3306/WineGDK.git"
-WINEGDK_BRANCH = "xbox-live-dev"   # ChristopherHX's tree, mirrored into the fork
+# xbox-live-dev (ChristopherHX, mirrored) does NOT boot — its Wine base is
+# ~1536 commits too old (loader/ntdll.so layout mismatch). master =
+# olivi-r XUser + our fixes: modern base, runs, identifies in-game; only
+# blocked by the title.auth credential wall (Microsoft-side, unfixable here).
+WINEGDK_BRANCH = "master"
 # OSS replacements for the game's GDK Xbox-Live DLLs (ChristopherHX). These
 # + the xbox-live-dev WineGDK are what got past the title.auth wall.
 GDK_DEPS_URL = "https://github.com/minecraft-linux/mcpelauncher-gdk-dependencies/releases/download/v0.0.0"
