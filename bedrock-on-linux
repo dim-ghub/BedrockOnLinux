@@ -1014,12 +1014,25 @@ def ensure_winegdk(force=False, progress=None):
         logf = LOGS / "winegdk-build.log"
         LOGS.mkdir(parents=True, exist_ok=True)
         info(f"Building WineGDK — long (full Wine build); log: {logf}")
-        # Clean build dir: a rebuild means the source changed (or --force),
-        # and a build tree configured for a different WineGDK lineage must
-        # not be reused.
-        shutil.rmtree(bdir, ignore_errors=True)
-        bdir.mkdir(parents=True, exist_ok=True)
-        with open(logf, "w") as lf:
+        # Incremental-friendly: only wipe the build dir when the source tree
+        # really changed (or --force). After an aborted build (compile
+        # error, ^C, crash) the next click resumes via `make` instead of
+        # restarting from scratch — saves a huge amount of time on the
+        # ~2600 .o files that already compiled.
+        stamp_want = f"{commit}|{prefix}"
+        stamp_have = cfg_stamp.read_text().strip() if cfg_stamp.exists() else ""
+        # Treat the legacy stamp format (just the prefix path, no commit)
+        # as matching the current target so a previously-aborted build is
+        # resumed, not discarded.
+        if stamp_have == str(prefix):
+            stamp_have = stamp_want
+        clean = force or stamp_have != stamp_want
+        if clean:
+            shutil.rmtree(bdir, ignore_errors=True)
+            bdir.mkdir(parents=True, exist_ok=True)
+        else:
+            info(f"  resuming previous build ({commit[:9]}) — incremental.")
+        with open(logf, "a" if not clean else "w") as lf:
             def sh(cmd, cwd):
                 lf.write("\n$ " + " ".join(cmd) + "\n")
                 lf.flush()
@@ -1027,10 +1040,10 @@ def ensure_winegdk(force=False, progress=None):
                                   stderr=subprocess.STDOUT).returncode:
                     die(f"WineGDK build failed: {' '.join(cmd[:2])} … — "
                         f"see {logf}")
-            if not cfg_stamp.exists() or force:
+            if clean:
                 sh([str(WINEGDK_SRC / "configure"), "--enable-win64",
                     "--disable-tests", f"--prefix={prefix}"], bdir)
-                cfg_stamp.write_text(str(prefix))
+                cfg_stamp.write_text(stamp_want)
             info("  configure done — compiling (the long part) …")
             sh(["make", f"-j{os.cpu_count() or 2}"], bdir)
             info("  compiled — installing Wine into the Proton tree …")
