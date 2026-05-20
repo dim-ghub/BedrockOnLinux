@@ -1048,6 +1048,24 @@ def ensure_winegdk(force=False, progress=None):
             sh(["make", f"-j{os.cpu_count() or 2}"], bdir)
             info("  compiled — installing Wine into the Proton tree …")
             sh(["make", "install"], bdir)
+        # Wine 11.x with `--enable-win64` produces a single `wine` binary
+        # (no wine64, no wine64-preloader). The Proton script still calls
+        # `wine64` / `wine64-preloader` by name — when those names hold
+        # the stale binaries from the GE-Proton base copy, they expect
+        # the old flat ntdll.so layout and abort with
+        # `wine: could not load ntdll.so: …/lib/wine/ntdll.so`. Symlink
+        # the legacy names to the unified loader so Proton's invocation
+        # routes through our build.
+        bin_dir = prefix / "bin"
+        if (bin_dir / "wine").is_file():
+            for legacy in ("wine64", "wine64-preloader", "wine-preloader"):
+                p = bin_dir / legacy
+                try:
+                    if p.exists() or p.is_symlink():
+                        p.unlink()
+                    p.symlink_to("wine")
+                except OSError as e:
+                    warn(f"wine binary symlink {legacy} failed: {e}")
         if not any((prefix).rglob("xgameruntime.dll")):
             warn("xgameruntime.dll absent after install — build/layout off "
                  "(see logs).")
