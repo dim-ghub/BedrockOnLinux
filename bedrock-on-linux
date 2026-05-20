@@ -73,12 +73,12 @@ GDK_DEPS_DLLS = ("libHttpClient.GDK.dll", "XCurl.dll")
 WINEGDK_SRC = DATA / "winegdk-src"
 WINEGDK_OUT = PROTON_DIR / "GDK-Proton-xuser"
 # Bump when the build/packaging method changes → forces a clean rebuild.
-WINEGDK_BUILD_REV = "ovl2-prefix"
+WINEGDK_BUILD_REV = "wow64-archs"
 
 # Direct package list for a 64-bit WineGDK build that can display/run the
 # game — avoids `apt build-dep wine` (needs deb-src, absent on Mint/LMDE).
 WINE_BUILD_PKGS = (
-    "flex bison gcc-mingw-w64-x86-64 pkg-config "
+    "flex bison gcc-mingw-w64-x86-64 gcc-mingw-w64-i686 pkg-config "
     "libx11-dev libxext-dev libxrandr-dev libxrender-dev libxi-dev "
     "libxcursor-dev libxcomposite-dev libxinerama-dev libxfixes-dev "
     "libxxf86vm-dev libfreetype-dev libfontconfig1-dev libgl1-mesa-dev "
@@ -993,7 +993,8 @@ def ensure_winegdk(force=False, progress=None):
         info(f"WineGDK build up to date ({commit[:9]})")
     else:
         need = [t for t in ("git", "gcc", "make", "flex", "bison",
-                             "x86_64-w64-mingw32-gcc") if not shutil.which(t)]
+                             "x86_64-w64-mingw32-gcc",
+                             "i686-w64-mingw32-gcc") if not shutil.which(t)]
         if need:
             die("Build tools missing: " + " ".join(need) + "\n"
                 "  Install (no deb-src needed):\n  "
@@ -1019,12 +1020,18 @@ def ensure_winegdk(force=False, progress=None):
         # error, ^C, crash) the next click resumes via `make` instead of
         # restarting from scratch — saves a huge amount of time on the
         # ~2600 .o files that already compiled.
-        stamp_want = f"{commit}|{prefix}"
+        # Stamp the build dir with commit AND configure flags rev. A flag
+        # change (e.g. --enable-win64 -> --enable-archs) means the cached
+        # objects are for a different Wine layout and must be discarded
+        # instead of incremental-rebuilt.
+        stamp_want = f"{commit}|{WINEGDK_BUILD_REV}|{prefix}"
         stamp_have = cfg_stamp.read_text().strip() if cfg_stamp.exists() else ""
-        # Treat the legacy stamp format (just the prefix path, no commit)
-        # as matching the current target so a previously-aborted build is
-        # resumed, not discarded.
-        if stamp_have == str(prefix):
+        # Treat the legacy stamp formats as matching only when the layout
+        # rev hasn't changed: bare-prefix stamps and commit|prefix stamps
+        # come from --enable-win64 builds, so on a build-rev bump we
+        # invalidate them.
+        if stamp_have in (str(prefix), f"{commit}|{prefix}") \
+                and WINEGDK_BUILD_REV == "ovl2-prefix":
             stamp_have = stamp_want
         clean = force or stamp_have != stamp_want
         if clean:
@@ -1041,7 +1048,13 @@ def ensure_winegdk(force=False, progress=None):
                     die(f"WineGDK build failed: {' '.join(cmd[:2])} … — "
                         f"see {logf}")
             if clean:
-                sh([str(WINEGDK_SRC / "configure"), "--enable-win64",
+                # --enable-archs builds the i386 PE half too, so the new
+                # Wine WoW64 can actually run 32-bit binaries (msiexec,
+                # most installers, the WinAppRuntime MSIX deployer …).
+                # --enable-win64 alone gives 64-bit-only and any 32-bit
+                # exec dies in loader_init c0000005.
+                sh([str(WINEGDK_SRC / "configure"),
+                    "--enable-archs=i386,x86_64",
                     "--disable-tests", f"--prefix={prefix}"], bdir)
                 cfg_stamp.write_text(stamp_want)
             info("  configure done — compiling (the long part) …")
