@@ -730,19 +730,34 @@ def wine_reg_set_refresh_token(token):
 def wine_apply_winegdk_prereqs():
     """Prereqs for the xuser-olivi WineGDK path (birdayz): set the
     ConsoleMode registry value the build keys its non-Win32-PC code path
-    on (value 8). Run through the same proton/umu runtime/prefix."""
-    cmd, env = proton_umu_cmd("reg")
-    cmd += ["add",
-            r"HKLM\Software\Microsoft\Windows NT\CurrentVersion\OEM",
-            "/v", "ConsoleMode", "/t", "REG_DWORD", "/d", "8", "/f"]
+    on (value 8), and inject the WindowsAppRuntime UI-mute env vars into
+    HKCU\\Environment so Wine inherits them in every process inside the
+    prefix (pressure-vessel filters MICROSOFT_* out of the host env)."""
     LOGS.mkdir(parents=True, exist_ok=True)
     log = open(LOGS / "native-login.log", "a")
-    try:
-        subprocess.run(cmd, env=env, stdout=log,
-                       stderr=subprocess.STDOUT, timeout=120)
-        ok("WineGDK prereqs applied (ConsoleMode=8)")
-    except Exception as e:
-        warn(f"Could not apply WineGDK prereqs: {e}")
+    def _regadd(*args):
+        cmd, env = proton_umu_cmd("reg")
+        cmd += ["add", *args, "/f"]
+        try:
+            subprocess.run(cmd, env=env, stdout=log,
+                           stderr=subprocess.STDOUT, timeout=120)
+        except Exception as e:
+            warn(f"reg add {args[0]} failed: {e}")
+    _regadd(r"HKLM\Software\Microsoft\Windows NT\CurrentVersion\OEM",
+            "/v", "ConsoleMode", "/t", "REG_DWORD", "/d", "8")
+    # Mute the "Required components of the Windows App Runtime are
+    # missing" dialog: pressure-vessel drops MICROSOFT_* from the host
+    # env, so write the same knobs into HKCU\Environment where Wine's
+    # process creation picks them up. Both gates set to 0; FAILFAST
+    # cleared so Bootstrap returns the error instead of aborting.
+    for name, val in (
+        ("MICROSOFT_WINDOWSAPPRUNTIME_BOOTSTRAP_INITIALIZE_SHOWUI", "0"),
+        ("MICROSOFT_WINDOWSAPPRUNTIME_BOOTSTRAP_INITIALIZE_FAILFAST", "0"),
+        ("MICROSOFT_WINDOWSAPPRUNTIME_DEPLOYMENT_INITIALIZE_ONERRORSHOWUI",
+         "0"),
+    ):
+        _regadd(r"HKCU\Environment", "/v", name, "/t", "REG_SZ", "/d", val)
+    ok("WineGDK prereqs applied (ConsoleMode=8, WinAppRuntime UI muted)")
 
 
 def ensure_umu(force=False):
@@ -1240,11 +1255,18 @@ def launch(_pp=None):
     override = "GameInputRedist=b"
     cur = os.environ.get("WINEDLLOVERRIDES", "")
     env["WINEDLLOVERRIDES"] = cur + ";" + override if cur else override
-    # Suppress Microsoft.WindowsAppRuntime.dll's "Required components are
-    # missing — Install?" dialog when DeploymentManager.Initialize fails.
-    # On Linux/Wine the framework MSIX can't actually be installed (no
-    # MSIX deployment), so the dialog dead-ends into msiexec; muting it
-    # lets the game keep its degraded WinAppRuntime path going.
+    # Suppress the WindowsAppRuntime "Required components of the Windows
+    # App Runtime are missing — Install?" dialog.  The text lives in BOTH
+    # Microsoft.WindowsAppRuntime.Bootstrap.dll (MddBootstrapInitialize)
+    # and Microsoft.WindowsAppRuntime.dll (DeploymentManager.Initialize)
+    # — each path has its own env-var gate (also visible in `strings`):
+    #   BOOTSTRAP_INITIALIZE_SHOWUI / _FAILFAST and
+    #   DEPLOYMENT_INITIALIZE_ONERRORSHOWUI.
+    # On Wine the framework MSIX is never installable (no MSIX deploy),
+    # so both paths will always fail.  Mute the UI AND the failfast on
+    # Bootstrap so the process keeps running instead of aborting.
+    env["MICROSOFT_WINDOWSAPPRUNTIME_BOOTSTRAP_INITIALIZE_SHOWUI"] = "0"
+    env["MICROSOFT_WINDOWSAPPRUNTIME_BOOTSTRAP_INITIALIZE_FAILFAST"] = "0"
     env["MICROSOFT_WINDOWSAPPRUNTIME_DEPLOYMENT_INITIALIZE_ONERRORSHOWUI"] = "0"
     # Tune the PlayFab XSTS relying party WITHOUT rebuilding WineGDK
     # (resolver honours WINEGDK_XSTS_RP_<HOST>). Iterate via
