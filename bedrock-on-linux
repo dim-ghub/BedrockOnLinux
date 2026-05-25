@@ -744,6 +744,140 @@ class NativeAuth:
         self._stop = True
 
 
+def xbl_preauth(msa_access_token):
+    """Pre-fetch the Xbox Live device token from device.auth.xboxlive.com
+    using the host Python's OpenSSL stack and persist it where xgameruntime.dll
+    will pick it up.
+
+    Why: Wine 11.1's secur32 GnuTLS sends a ClientHello fingerprinted by
+    Microsoft Azure as a non-Schannel client — the *.auth.xboxlive.com edge
+    TCP-RSTs the connection immediately after we PUT the HTTP body across,
+    which surfaces as DeviceAuth_Initialize returning 0x80072746 and the
+    "Llama 0x80072746" sign-in dialog. The same request from Linux curl
+    (OpenSSL) returns a normal 400/200. Bypass Wine entirely for this one
+    call and ship the device token + signing key into the prefix so the
+    in-game GDK shim can sign every subsequent xboxlive call without re-
+    contacting the edge.
+
+    Persisted as a single JSON in $WINEGDK_PREAUTH_DIR/device.json so the
+    C side can mmap it without round-tripping through the registry.
+    Returns True on success, False on failure (caller falls back to the
+    Wine-side path)."""
+    import base64, uuid as _uuid
+    try:
+        from cryptography.hazmat.primitives.asymmetric import ec
+        from cryptography.hazmat.primitives import hashes, serialization
+        import requests
+    except ImportError as e:
+        warn(f"xbl_preauth: missing Python dep ({e}) — skipping")
+        return False
+    cache = DATA / "winegdk-preauth"
+    cache.mkdir(parents=True, exist_ok=True)
+    key_path = cache / "device-key.pem"
+    out_path = cache / "device.json"
+    # Reuse persisted EC P-256 key + UUID across launches so Xbox Live sees
+    # the same device on every session.
+    if key_path.exists() and (cache / "device-id.txt").exists():
+        try:
+            with open(key_path, "rb") as f:
+                priv = serialization.load_pem_private_key(f.read(), password=None)
+            device_id = (cache / "device-id.txt").read_text().strip()
+        except Exception:
+            priv = None; device_id = None
+    else:
+        priv = None; device_id = None
+    if priv is None:
+        priv = ec.generate_private_key(ec.SECP256R1())
+        device_id = "{" + str(_uuid.uuid4()) + "}"
+        with open(key_path, "wb") as f:
+            f.write(priv.private_bytes(serialization.Encoding.PEM,
+                                       serialization.PrivateFormat.PKCS8,
+                                       serialization.NoEncryption()))
+        (cache / "device-id.txt").write_text(device_id)
+    pub_numbers = priv.public_key().public_numbers()
+    x_b64 = base64.b64encode(pub_numbers.x.to_bytes(32, "big")).decode()
+    y_b64 = base64.b64encode(pub_numbers.y.to_bytes(32, "big")).decode()
+    proof_key = {"alg": "ES256", "crv": "P-256", "kty": "EC",
+                 "use": "sig", "x": x_b64, "y": y_b64}
+    body = {
+        "RelyingParty": "http://auth.xboxlive.com",
+        "TokenType": "JWT",
+        "Properties": {
+            "AuthMethod": "ProofOfPossession",
+            "Id": device_id,
+            "DeviceType": "Win32",
+            "Version": "10.0.22631",
+            "ProofKey": proof_key,
+        },
+    }
+    body_json = json.dumps(body, separators=(",", ":")).encode()
+    # Build the Xbox Live signature blob — wire format is ver(4) + ts(8) +
+    # raw ECDSA-P-256 r||s (64), 76 bytes total. The bytes SIGNED are a
+    # hash input that puts 0x00 separators between every field:
+    #   ver(4) || \0 || ts(8) || \0 || method || \0 || path || \0 || auth || \0 || body || \0
+    # SHA-256 of this is what gets signed (matches Wine-side
+    # DeviceAuth_SignRequest in dlls/xgameruntime/.../DeviceAuth.c). Missing
+    # the trailing separators returns HTTP 403 instead of 200.
+    import struct, time as _time
+    now_ft = int((_time.time() + 11644473600) * 1e7)  # epoch → WindowsFileTime
+    ver = (1).to_bytes(4, "big")
+    ts = now_ft.to_bytes(8, "big")
+    hash_input = (ver + b"\0" + ts + b"\0"
+                  + b"POST" + b"\0"
+                  + b"/device/authenticate" + b"\0"
+                  + b"" + b"\0"
+                  + body_json + b"\0")
+    sig_der = priv.sign(hash_input, ec.ECDSA(hashes.SHA256()))
+    # DER → raw r||s
+    from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
+    r, s = decode_dss_signature(sig_der)
+    sig_raw = r.to_bytes(32, "big") + s.to_bytes(32, "big")
+    sig_header = base64.b64encode(ver + ts + sig_raw).decode()
+    try:
+        r = requests.post(
+            "https://device.auth.xboxlive.com/device/authenticate",
+            data=body_json,
+            headers={
+                "User-Agent": "XAL Xbox Live Game (Windows; SDK; 1.0.0.0)",
+                "Content-Type": "application/json",
+                "x-xbl-contract-version": "1",
+                "Signature": sig_header,
+            },
+            timeout=15,
+        )
+    except Exception as e:
+        warn(f"xbl_preauth: device.auth POST failed: {e}")
+        return False
+    if r.status_code != 200:
+        warn(f"xbl_preauth: device.auth HTTP {r.status_code} — {r.text[:200]}")
+        return False
+    j = r.json()
+    # Export the EC P-256 key as BCRYPT_ECCPRIVATE_BLOB so xgameruntime.dll
+    # can BCryptImportKeyPair() it byte-for-byte. Layout (104 bytes):
+    #   dwMagic (LE u32 = BCRYPT_ECDSA_PRIVATE_P256_MAGIC 0x32534345)
+    #   cbKey   (LE u32 = 32)
+    #   X       (32 big-endian)
+    #   Y       (32 big-endian)
+    #   d       (32 big-endian, the private scalar)
+    priv_d = priv.private_numbers().private_value
+    ecc_blob = (
+        (0x32534345).to_bytes(4, "little") + (32).to_bytes(4, "little")
+        + pub_numbers.x.to_bytes(32, "big")
+        + pub_numbers.y.to_bytes(32, "big")
+        + priv_d.to_bytes(32, "big")
+    )
+    out = {
+        "device_id": device_id,
+        "ecc_private_blob_b64": base64.b64encode(ecc_blob).decode(),
+        "device_token": j["Token"],
+        "device_token_expiry": j.get("NotAfter", ""),
+        "obtained": int(_time.time()),
+    }
+    out_path.write_text(json.dumps(out, indent=2))
+    ok(f"Xbox Live device token pre-fetched (expires {out.get('device_token_expiry','?')[:19]})")
+    return True
+
+
 def wine_reg_set_refresh_token(token):
     """Seed the MSA refresh token where WineGDK's XUser (PR #33) reads it:
     HKLM\\Software\\Wine\\WineGDK 'RefreshToken'. Written through the same
@@ -1330,6 +1464,13 @@ def launch(_pp=None):
         tok = fresh["refresh_token"]
     wine_apply_winegdk_prereqs()
     wine_reg_set_refresh_token(tok)
+    # Bypass Wine GnuTLS for the JA3-fingerprinted /device/authenticate call:
+    # do it from the host Python's OpenSSL stack and persist the token where
+    # xgameruntime.dll's DeviceAuth_Initialize will read it instead of POSTing.
+    # If this fails the C side falls back to the broken Wine path (still
+    # better than crashing the launch).
+    access = (fresh or {}).get("access_token") if fresh else None
+    xbl_preauth(access or "")
     kill_wine()
     exe = str(CONTENT / "Minecraft.Windows.exe")
     cmd, env = proton_umu_cmd(exe)
@@ -1383,6 +1524,15 @@ def launch(_pp=None):
         prio.write_text("[priorities]\nSYSTEM = NORMAL:-VERS-TLS1.3:%COMPAT\n")
     env["GNUTLS_SYSTEM_PRIORITY_FILE"] = str(prio)
     env["GNUTLS_SYSTEM_PRIORITY_FAIL_ON_INVALID"] = "0"
+    # Tell DeviceAuth_Initialize where to find the host-side pre-auth blob
+    # (set by xbl_preauth above). When present, the C side imports the EC
+    # private key, sets the device_token, and skips the broken Wine /device/
+    # authenticate POST entirely. Path is the Linux path translated through
+    # Wine's Z: drive — Wine recognises Z:\\ as `/` and CreateFileA / fopen
+    # can read it like any local file.
+    preauth = DATA / "winegdk-preauth" / "device.json"
+    if preauth.exists():
+        env["WINEGDK_PREAUTH_DEVICE"] = "Z:" + str(preauth).replace("/", "\\")
     # Tune the PlayFab XSTS relying party WITHOUT rebuilding WineGDK
     # (resolver honours WINEGDK_XSTS_RP_<HOST>). Iterate via
     # `config --xsts-rp <value>`.
