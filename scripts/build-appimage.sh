@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build a portable AppImage (single file, runs on any glibc Linux).
-# Heavy components (Proton/Java/ProxyPass) are still fetched at first run by
+# Heavy components (GDK-Proton, the game) are fetched/built at first run by
 # design (huge & version-specific), keeping the AppImage tiny.
 set -euo pipefail
 

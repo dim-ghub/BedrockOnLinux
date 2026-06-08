@@ -24,7 +24,7 @@ from pathlib import Path
 
 APP = "bedrock-on-linux"
 PRETTY = "BedrockOnLinux"
-VERSION = "0.5.1"
+VERSION = "1.0.0"
 
 HOME = Path.home()
 DATA = Path(os.environ.get("BOL_HOME", HOME / ".local/share" / APP))
@@ -1067,10 +1067,12 @@ def ensure_umu(force=False):
     return binp
 
 
-def _heroic_pfx():
-    """A Heroic-built GDK prefix that already runs Minecraft (the inbob1
-    tutorial setup) is the most reliable environment. Reuse it verbatim if
-    present rather than rebuild an equivalent."""
+def _existing_gdk_pfx():
+    """Reuse an already-working GDK Wine prefix if the host happens to have one
+    (some users set one up via another GDK launcher). It already carries
+    Microsoft GameInput and the GDK runtime, so reusing it verbatim is a touch
+    more reliable than our own. Returns None when there's none — we then build
+    and populate our own prefix, so a fresh machine works with no extra setup."""
     base = HOME / "Games/Heroic/Prefixes"
     if not base.is_dir():
         return None
@@ -1081,22 +1083,27 @@ def _heroic_pfx():
     return None
 
 
-def proton_umu_cmd(exe):
-    """Launch GDK-Proton through umu-launcher (Steam Linux Runtime), the way
-    Heroic actually does it — the GDK networking the LAN join needs only
-    works inside that runtime, not with a bare `proton run`."""
-    hp = _heroic_pfx()
-    if hp:
-        prefix = hp
-        info(f"Reusing Heroic prefix: {hp}")
-    else:
-        prefix = PFX
+def active_prefix():
+    """The Wine prefix the game runs in: an existing GDK prefix when present,
+    otherwise our own self-contained one (populated by do_setup)."""
+    return _existing_gdk_pfx() or PFX
+
+
+def proton_umu_cmd(exe, prefix=None):
+    """Launch GDK-Proton through umu-launcher (Steam Linux Runtime). The GDK
+    networking the LAN/server join needs only works inside that runtime, not
+    with a bare `proton run`."""
+    if prefix is None:
+        prefix = active_prefix()
+    if prefix == PFX:
         COMPAT.mkdir(parents=True, exist_ok=True)
         if PFX.is_symlink():               # drop any legacy symlink layout
             PFX.unlink()
             for junk in ("pfx.lock", "version", "tracked_files",
                          "config_info"):
                 (COMPAT / junk).unlink(missing_ok=True)
+    else:
+        info(f"Using existing GDK prefix: {prefix}")
     (HOME / ".steam/steam").mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env.update({"GAMEID": "0", "PROTONPATH": str(proton_path()),
@@ -1256,7 +1263,7 @@ def _install_openssl_xcurl(game_dir: Path):
        "(PlayFab Azure Front Door bypass)")
 
 
-def _install_cryptbase_in_prefix():
+def _install_cryptbase_in_prefix(pfx=None):
     """Install the self-contained cryptbase.dll stub into the active prefix's
     system32. advapi32 forwards SystemFunction036 (RtlGenRandom) to cryptbase,
     and Wine resolves that forward from system32 (advapi32's own directory) —
@@ -1267,7 +1274,7 @@ def _install_cryptbase_in_prefix():
     src = OPENSSL_XCURL_SET / "cryptbase.dll"
     if not src.exists():
         return
-    pfx = _heroic_pfx() or PFX
+    pfx = pfx or active_prefix()
     sys32 = pfx / "drive_c/windows/system32"
     if not sys32.is_dir():
         warn(f"prefix system32 not found at {sys32} — cryptbase stub not "
@@ -1290,6 +1297,64 @@ def _install_cryptbase_in_prefix():
         ok("cryptbase RNG stub installed in prefix system32")
     except Exception as e:
         warn(f"cryptbase install failed: {e}")
+
+
+def install_gameinput(prefix: Path, game_dir: Path):
+    """Install Microsoft GameInput into the prefix so the game starts.
+
+    Without gameinput.dll Minecraft GDK aborts at launch with a 'GameInput
+    Runtime could not be loaded' dialog. The redistributable ships inside the
+    game package itself (Installers/GameInputRedist.msi) and installs the very
+    same gameinput.dll a working GDK prefix has, so this is fully reproducible
+    on any machine — no bundling, no extra download. Idempotent: skips when
+    gameinput.dll is already there (a fresh install or an existing GDK prefix
+    we reuse)."""
+    sys32 = prefix / "drive_c/windows/system32"
+    if (sys32 / "gameinput.dll").exists():
+        return
+    msi = game_dir / "Installers" / "GameInputRedist.msi"
+    if not msi.exists():
+        warn("GameInputRedist.msi missing from the game package — GameInput "
+             "not installed; the game may show a 'missing component' dialog.")
+        return
+    info("Installing Microsoft GameInput …")
+    LOGS.mkdir(parents=True, exist_ok=True)
+    log = open(LOGS / "native-login.log", "a")
+    # msiexec boots the prefix and writes gameinput.dll (x64 -> system32,
+    # x86 -> syswow64) early, but a post-install custom action then calls
+    # advapi32.SystemFunction036 (RtlGenRandom) from a wineserver-spawned
+    # process this Wine leaves unimplemented — it loops in the debugger and
+    # never exits. The DLLs are all we need, so we poll until both are in
+    # place, then tear the install down scoped to this prefix (so a real
+    # game running in another prefix is never touched).
+    gi64 = sys32 / "gameinput.dll"
+    gi32 = prefix / "drive_c/windows/syswow64/gameinput.dll"
+    cmd, env = proton_umu_cmd("msiexec", prefix=prefix)
+    env["WINEDEBUG"] = "-all"
+    cmd += ["/i", "Z:" + str(msi).replace("/", "\\"), "/qn"]
+    proc = subprocess.Popen(cmd, env=env, stdout=log, stderr=subprocess.STDOUT,
+                            start_new_session=True)
+    end = time.time() + 240
+    while time.time() < end:
+        if proc.poll() is not None:
+            break
+        if gi64.exists() and gi32.exists():
+            time.sleep(2)                  # let the writer finish/close
+            break
+        time.sleep(2)
+    if proc.poll() is None:
+        kill_prefix_procs(prefix)
+        try:
+            proc.wait(10)
+        except Exception:
+            proc.kill()
+    else:
+        kill_prefix_procs(prefix)          # reap any orphaned install services
+    if gi64.exists():
+        ok("Microsoft GameInput installed")
+    else:
+        warn("GameInput install produced no gameinput.dll — the game may show "
+             "a 'missing component' dialog.")
 
 
 def _patch_lhc_xcurl_gate(game_dir: Path):
@@ -1322,6 +1387,19 @@ def _patch_lhc_xcurl_gate(game_dir: Path):
         return
     apply_patch(dll, ja_off, expect, b"\x90" * 6,
                 "libHttpClient → force XCurl provider", strict=False)
+
+
+def kill_prefix_procs(prefix: Path):
+    """Kill every process running in a specific Wine prefix, matched by its
+    WINEPREFIX env var via /proc — so tearing down one prefix's install never
+    touches a game running in another prefix."""
+    target = ("WINEPREFIX=" + str(prefix)).encode() + b"\0"
+    for pdir in Path("/proc").glob("[0-9]*"):
+        try:
+            if target in pdir.joinpath("environ").read_bytes():
+                os.kill(int(pdir.name), 9)
+        except Exception:
+            continue
 
 
 def kill_wine():
@@ -1605,6 +1683,7 @@ def do_setup(game_dir=None, mc_ver=None, proton_tag=None, pp_tag=None,
         ensure_proton(proton_tag, force, progress)  # user-supplied dir/url
     ensure_umu(force)
     fix_curl_ssl(gd)
+    install_gameinput(active_prefix(), gd)     # also bootstraps a fresh prefix
     ok("Setup complete — click PLAY, then sign in to Microsoft in-game.")
 
 
@@ -1706,16 +1785,15 @@ def launch(_pp=None):
     # entry/exit, no HTTP status, no body — which is exactly why sign-in
     # loops have been opaque to debug. fixme+all keeps the rest tractable.
     env["WINEDEBUG"] = os.environ.get("WINEDEBUG") or "+gdkc,+winhttp,fixme+all"
-    # GameInputRedist.dll: the previous "GameInputRedist=b" override
-    # (forcing built-in only) was meant to dodge the NtQueryWnfStateData
-    # abort, but Wine has no builtin and the load fails -> Minecraft pops
-    # the localised "gameinput_load.error.message" dialog (a "missing required
-    # component / Install" prompt) which dead-ends in msiexec. patch_proton
-    # already neutralises the ntdll unimplemented-stub funnel
-    # (NtQueryWnfStateData now returns STATUS_NOT_IMPL cleanly), and the prefix
-    # has the native GameInputRedist.dll in
-    # both Program Files\\Microsoft GameInput and system32 from the
-    # bundled MSI — let Wine load that one.  Keep an extra
+    # GameInput: the previous "GameInputRedist=b" override (forcing built-in
+    # only) was meant to dodge the NtQueryWnfStateData abort, but Wine has no
+    # builtin and the load fails -> Minecraft pops the localised
+    # "gameinput_load.error.message" dialog (a "missing required component /
+    # Install" prompt) which dead-ends in msiexec. patch_proton already
+    # neutralises the ntdll unimplemented-stub funnel (NtQueryWnfStateData now
+    # returns STATUS_NOT_IMPL cleanly), and setup (install_gameinput) has put
+    # the native gameinput.dll in system32/syswow64 from the game's own
+    # Installers\\GameInputRedist.msi — let Wine load that one.  Keep an extra
     # WINEDLLOVERRIDES from the host env if the user explicitly set it.
     # cryptbase=n (native): load our self-contained cryptbase.dll stub from the
     # game dir so OpenSSL XCurl's advapi32.SystemFunction036 (RtlGenRandom)

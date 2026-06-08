@@ -38,9 +38,9 @@ Recommends: mesa-vulkan-drivers | nvidia-driver
 Maintainer: BedrockOnLinux contributors <noreply@bedrockonlinux.invalid>
 Homepage: https://github.com/BedrockOnLinux/BedrockOnLinux
 Description: Run Minecraft Bedrock (Windows GDK) on Linux, multiplayer included
- One graphical launcher that downloads and binary-patches GDK-Proton,
- a bundled Java and the matching ProxyPass relay, then launches
- Minecraft Bedrock with multiplayer working via a background relay.
+ One graphical launcher that downloads and builds a WineGDK-based GDK-Proton,
+ applies the binary patches the game needs, and signs you in to Microsoft
+ inside the game (no relay, no proxy) so native and crossplay servers work.
  No game files are shipped; you supply your own.
 EOF
 
