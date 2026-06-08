@@ -5,3 +5,5 @@ __pycache__/
 *.pyc
 .idea/
 .vscode/
+.claude/
+*.git-original.bak

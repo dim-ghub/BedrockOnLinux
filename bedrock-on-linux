@@ -71,6 +71,11 @@ WINEGDK_BRANCH = "xuser-olivi"
 # + the xbox-live-dev WineGDK are what got past the title.auth wall.
 GDK_DEPS_URL = "https://github.com/minecraft-linux/mcpelauncher-gdk-dependencies/releases/download/v0.0.0"
 GDK_DEPS_DLLS = ("libHttpClient.GDK.dll", "XCurl.dll")
+# An OpenSSL-backed libcurl (+ full DLL dep set + a self-contained cryptbase
+# RtlGenRandom stub) shipped here is renamed XCurl.dll in the game dir so
+# Minecraft's PlayFab traffic goes over OpenSSL TLS, bypassing Wine secur32 and
+# the Azure Front Door FIN wall that breaks native (no-ProxyPass) sign-in.
+OPENSSL_XCURL_SET = DATA / "xodus-xcurl" / "openssl-set"
 WINEGDK_SRC = DATA / "winegdk-src"
 WINEGDK_OUT = PROTON_DIR / "GDK-Proton-xuser"
 # Bump when the build/packaging method changes → forces a clean rebuild.
@@ -930,6 +935,24 @@ def xbl_preauth(msa_access_token):
         sisu_uhs = pf_auth["DisplayClaims"]["xui"][0].get("uhs")
     except (KeyError, IndexError, TypeError):
         pass
+
+    # ---- 3c. sisu /authorize for the multiplayer RP MC pins when JOINING a
+    # third-party / external server. The game requests an XSTS token for
+    # https://multiplayer.minecraft.net/ via XUserGetTokenAndSignature; without
+    # a pre-minted one xgameruntime falls back to a live SISU call which RSTs
+    # under Wine GnuTLS, so the token comes back empty and the join fails (the
+    # ping still works -- it's the join handshake's identity chain that's missing).
+    mp_sisu = _sisu("https://multiplayer.minecraft.net/") or {}
+    mp_auth = mp_sisu.get("AuthorizationToken", {}) if mp_sisu else {}
+    mp_rp = "https://multiplayer.minecraft.net/" if mp_auth.get("Token") else None
+    mp_token = mp_auth.get("Token")
+    mp_expiry = mp_auth.get("NotAfter", "")
+    mp_uhs = None
+    try:
+        mp_uhs = mp_auth["DisplayClaims"]["xui"][0].get("uhs")
+    except (KeyError, IndexError, TypeError):
+        pass
+
     # Export the EC P-256 key as BCRYPT_ECCPRIVATE_BLOB so xgameruntime.dll
     # can BCryptImportKeyPair() it byte-for-byte. Layout (104 bytes):
     #   dwMagic (LE u32 = BCRYPT_ECDSA_PRIVATE_P256_MAGIC 0x32534345)
@@ -965,13 +988,20 @@ def xbl_preauth(msa_access_token):
         "sisu_token": sisu_token,
         "sisu_uhs": sisu_uhs,
         "sisu_expiry": sisu_expiry,
+        # SISU for the multiplayer RP — same idea, used when joining a
+        # third-party/external server (https://multiplayer.minecraft.net/).
+        "mp_rp": mp_rp,
+        "mp_token": mp_token,
+        "mp_uhs": mp_uhs,
+        "mp_expiry": mp_expiry,
         "obtained": int(_time.time()),
     }
     out_path.write_text(json.dumps(out, indent=2))
     bits = ["device"]
     if user_token: bits.append("user")
     if xbl_token: bits.append(f"XBL(xuid={xbl_claims.get('xid')},gtg={xbl_claims.get('gtg')})")
-    if sisu_token: bits.append(f"SISU(uhs={sisu_uhs})")
+    if sisu_token: bits.append(f"SISU-pf(uhs={sisu_uhs})")
+    if mp_token: bits.append(f"SISU-mp(uhs={mp_uhs})")
     ok(f"Xbox Live pre-auth: {', '.join(bits)}")
     return True
 
@@ -1162,6 +1192,8 @@ def install_gdk_xbox_dlls(game_dir: Path):
             shutil.copy2(dst, bak)
         shutil.copy2(cached, dst)
     ok("Xbox-Live OSS DLLs installed")
+    _install_openssl_xcurl(game_dir)
+    _patch_lhc_xcurl_gate(game_dir)
     _patch_hbui_signin_gate(game_dir)
 
 
@@ -1197,6 +1229,135 @@ def _patch_hbui_signin_gate(game_dir: Path):
         Path(js).write_text(data.replace(needle, 'function wB(){return"";return', 1))
         ok(f"HBUI sign-in gate bypassed in {Path(js).name}")
         return
+
+
+def _install_openssl_xcurl(game_dir: Path):
+    """Make Minecraft's PlayFab HTTP go over OpenSSL instead of Wine secur32.
+
+    The shipped GDK XCurl.dll uses Schannel, so its TLS rides Wine secur32 and
+    Azure Front Door silently FINs every PlayFab POST (login loops). We install
+    an OpenSSL-backed libcurl instead — it does its own TLS end to end and
+    reaches PlayFab (verified: real HTTP 400 JSON where Schannel got 0 bytes).
+
+    Three pieces land in the game dir:
+      • XCurl.dll      — a thin CA-injecting shim (xcurl-cashim.dll). The game's
+        libHttpClient CurlProvider never sets CURLOPT_CAINFO, and this libcurl
+        ignores CURL_CA_BUNDLE/SSL_CERT_FILE env + has no app-dir CA auto-search
+        under Wine, so cert validation (enforced in-game) would fail. The shim
+        forwards every curl_* call to the real libcurl but injects
+        CURLOPT_CAINFO=<dir>\\cacert.pem at curl_easy_init. Verified: a verify=ON
+        multi-interface POST to PlayFab returns HTTP 400 (TLS validated).
+      • xcurl_real.dll — the actual OpenSSL libcurl the shim forwards to.
+      • cacert.pem + the libssl/libcrypto/zlib/… dependency set.
+    The cryptbase RNG stub (advapi32.SystemFunction036) is installed separately
+    into the prefix system32 by _install_cryptbase_in_prefix(); launch() adds
+    WINEDLLOVERRIDES=cryptbase=n. Idempotent."""
+    s = OPENSSL_XCURL_SET
+    libcurl = s / "libcurl-4.dll"
+    shim = s / "xcurl-cashim.dll"
+    if not libcurl.exists() or not shim.exists():
+        warn(f"OpenSSL XCurl set incomplete at {s} — keeping the Schannel "
+             "XCurl.dll (native PlayFab login will fail under Wine secur32).")
+        return
+    # Preserve the genuine original XCurl once (install_gdk_xbox_dlls usually
+    # already did this; guard anyway so we never lose it).
+    for nm in ("XCurl.dll", "Xcurl.dll"):
+        dst = game_dir / nm
+        bak = Path(str(dst) + ".bol-orig")
+        if dst.exists() and not bak.exists():
+            shutil.copy2(dst, bak)
+    # The whole dependency set, EXCEPT the shim source/variants and cryptbase
+    # (cryptbase belongs in system32, not the game dir).
+    skip = {"cryptbase.dll", "xcurl-cashim.dll"}
+    for dll in sorted(s.glob("*.dll")):
+        if dll.name in skip or dll.name.endswith((".bak", ".fwd-bak",
+                                                  ".1export-bak")):
+            continue
+        shutil.copy2(dll, game_dir / dll.name)
+    # the real OpenSSL libcurl the shim forwards to
+    shutil.copy2(libcurl, game_dir / "xcurl_real.dll")
+    # the CA-injecting shim becomes XCurl.dll (both casings libHttpClient probes)
+    for nm in ("XCurl.dll", "Xcurl.dll"):
+        shutil.copy2(shim, game_dir / nm)
+    # the CA bundle the shim points CURLOPT_CAINFO at (fix_curl_ssl downloads it)
+    cacert = CACHE / "cacert.pem"
+    if not cacert.exists():
+        try:
+            download(CACERT_URL, cacert, "certificats SSL")
+        except Exception as e:
+            warn(f"cacert download failed: {e}")
+    if cacert.exists():
+        shutil.copy2(cacert, game_dir / "cacert.pem")
+    ok("OpenSSL XCurl (CA-injecting shim) + deps installed "
+       "(PlayFab Azure Front Door bypass)")
+
+
+def _install_cryptbase_in_prefix():
+    """Install the self-contained cryptbase.dll stub into the active prefix's
+    system32. advapi32 forwards SystemFunction036 (RtlGenRandom) to cryptbase,
+    and Wine resolves that forward from system32 (advapi32's own directory) —
+    NOT the game dir — so the OpenSSL XCurl that libHttpClient LoadLibrary's
+    internally only gets its RNG if the stub is here. This Wine leaves
+    SystemFunction036 unimplemented otherwise → curl aborts at first TLS RNG
+    call. Backs up any pre-existing cryptbase once; idempotent (sha compare)."""
+    src = OPENSSL_XCURL_SET / "cryptbase.dll"
+    if not src.exists():
+        return
+    pfx = _heroic_pfx() or PFX
+    sys32 = pfx / "drive_c/windows/system32"
+    if not sys32.is_dir():
+        warn(f"prefix system32 not found at {sys32} — cryptbase stub not "
+             "installed (native PlayFab login may fail).")
+        return
+    dst = sys32 / "cryptbase.dll"
+    try:
+        import hashlib
+        if dst.exists() and hashlib.sha1(dst.read_bytes()).digest() == \
+                hashlib.sha1(src.read_bytes()).digest():
+            return                                  # already our stub
+        # Install our self-contained stub (036=RtlGenRandom xorshift, 040/041
+        # no-op). It's proven to let the OpenSSL XCurl load + run; an existing
+        # prefix cryptbase may be a non-functional placeholder, so we replace it
+        # but keep a one-time backup for restore.
+        bak = sys32 / "cryptbase.dll.bol-orig"
+        if dst.exists() and not bak.exists():
+            shutil.copy2(dst, bak)
+        shutil.copy2(src, dst)
+        ok("cryptbase RNG stub installed in prefix system32")
+    except Exception as e:
+        warn(f"cryptbase install failed: {e}")
+
+
+def _patch_lhc_xcurl_gate(game_dir: Path):
+    """Force libHttpClient.GDK onto the XCurl/Curl HTTP provider.
+
+    PlatformInitialize picks its provider by console-detection: it reads
+    HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion\\OEM\\ConsoleMode,
+    maps known Xbox hardware codes to a device-type enum, then runs
+    `add eax,-2 ; cmp eax,6 ; ja <winhttp>` — so only console enums (2..8)
+    take the XCurl path; everything else (incl. Wine, where ConsoleMode is not
+    a real hardware code → enum 0) falls to WinHTTP → Wine secur32 → the Azure
+    Front Door wall. NOP that 6-byte `ja` so the XCurl branch is always taken.
+    Combined with the OpenSSL XCurl.dll above this routes PlayFab over OpenSSL.
+    Idempotent; apply_patch backs up the original first."""
+    dll = game_dir / "libHttpClient.GDK.dll"
+    if not dll.exists():
+        return
+    data = dll.read_bytes()
+    # add eax,-2 ; mov edx,4 ; lea rcx,[rip+imm32] ; cmp eax,6 ; ja rel32
+    m = re.search(rb"\x83\xc0\xfe\xba\x04\x00\x00\x00\x48\x8d\x0d.{4}\x83\xf8\x06"
+                  rb"\x0f\x87.{4}", data, re.S)
+    if not m:
+        warn("libHttpClient provider gate not found — XCurl routing patch "
+             "skipped (native login may fall back to WinHTTP).")
+        return
+    ja_off = m.start() + 18          # past add(3)+mov(5)+lea(7)+cmp(3)
+    expect = data[ja_off:ja_off + 6]
+    if expect[:2] != b"\x0f\x87":
+        warn("libHttpClient gate anchor misaligned — XCurl patch skipped.")
+        return
+    apply_patch(dll, ja_off, expect, b"\x90" * 6,
+                "libHttpClient → force XCurl provider", strict=False)
 
 
 def kill_wine():
@@ -1561,6 +1722,7 @@ def launch(_pp=None):
                   "obtained": int(time.time())})
         tok = fresh["refresh_token"]
     wine_apply_winegdk_prereqs()
+    _install_cryptbase_in_prefix()
     wine_reg_set_refresh_token(tok)
     # Bypass Wine GnuTLS for the JA3-fingerprinted /device/authenticate call:
     # do it from the host Python's OpenSSL stack and persist the token where
@@ -1582,18 +1744,23 @@ def launch(_pp=None):
     env["WINEDEBUG"] = os.environ.get("WINEDEBUG") or "+gdkc,+winhttp,fixme+all"
     # GameInputRedist.dll: the previous "GameInputRedist=b" override
     # (forcing built-in only) was meant to dodge the NtQueryWnfStateData
-    # abort, but Wine has no builtin and the load fails → Minecraft pops
-    # the localised "gameinput_load.error.message" dialog ("Il manque un
-    # composant nécessaire au jeu… Installer") which dead-ends in
-    # msiexec.  patch_proton already neutralises the ntdll unimplemented-
-    # stub funnel (NtQueryWnfStateData now returns STATUS_NOT_IMPL
-    # cleanly), and the prefix has the native GameInputRedist.dll in
+    # abort, but Wine has no builtin and the load fails -> Minecraft pops
+    # the localised "gameinput_load.error.message" dialog (a "missing required
+    # component / Install" prompt) which dead-ends in msiexec. patch_proton
+    # already neutralises the ntdll unimplemented-stub funnel
+    # (NtQueryWnfStateData now returns STATUS_NOT_IMPL cleanly), and the prefix
+    # has the native GameInputRedist.dll in
     # both Program Files\\Microsoft GameInput and system32 from the
     # bundled MSI — let Wine load that one.  Keep an extra
     # WINEDLLOVERRIDES from the host env if the user explicitly set it.
+    # cryptbase=n (native): load our self-contained cryptbase.dll stub from the
+    # game dir so OpenSSL XCurl's advapi32.SystemFunction036 (RtlGenRandom)
+    # resolves; this Wine leaves it unimplemented otherwise and curl aborts.
+    overrides = ["cryptbase=n"]
     cur = os.environ.get("WINEDLLOVERRIDES", "")
     if cur:
-        env["WINEDLLOVERRIDES"] = cur
+        overrides.append(cur)
+    env["WINEDLLOVERRIDES"] = ";".join(overrides)
     # Suppress the WindowsAppRuntime "Required components of the Windows
     # App Runtime are missing — Install?" dialog.  The text lives in BOTH
     # Microsoft.WindowsAppRuntime.Bootstrap.dll (MddBootstrapInitialize)
