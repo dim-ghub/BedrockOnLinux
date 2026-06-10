@@ -24,7 +24,7 @@ from pathlib import Path
 
 APP = "bedrock-on-linux"
 PRETTY = "BedrockOnLinux"
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 
 HOME = Path.home()
 DATA = Path(os.environ.get("BOL_HOME", HOME / ".local/share" / APP))
@@ -1259,7 +1259,8 @@ def _install_openssl_xcurl(game_dir: Path):
       • cacert.pem + the libssl/libcrypto/zlib/… dependency set.
     The cryptbase RNG stub (advapi32.SystemFunction036) is installed separately
     into the prefix system32 by _install_cryptbase_in_prefix(); launch() adds
-    WINEDLLOVERRIDES=cryptbase=n. Idempotent."""
+    WINEDLLOVERRIDES=cryptbase=n,b (native stub, else GDK-Proton builtin).
+    Idempotent."""
     s = OPENSSL_XCURL_SET
     libcurl = s / "libcurl-4.dll"
     shim = s / "xcurl-cashim.dll"
@@ -1829,6 +1830,15 @@ _DIAG_RULES = [
     (r"Authentication failed|invalid_grant|login.*failed",
      "Microsoft sign-in failed in-game — sign in again "
      "(open the link, enter the code)."),
+    # Must come BEFORE the nodrv_CreateWindow rule: when SystemFunction036 is
+    # unresolved, every Wine service and explorer.exe abort on RtlGenRandom, and
+    # the *symptom* is a nodrv_CreateWindow / "explorer failed to start". That is
+    # NOT a broken prefix or a GPU fault, so resetting the prefix can't fix it.
+    (r"unimplemented function advapi32\.dll\.SystemFunction036|"
+     r"forward 'cryptbase\.SystemFunction036'|"
+     r"module not found for forward 'cryptbase",
+     "Wine RNG unresolved (cryptbase.SystemFunction036) — re-run "
+     "'Install / Update'; the builtin-cryptbase fallback fixes this on relaunch."),
     (r"nodrv_CreateWindow|no driver could be loaded|"
      r"explorer process failed to start",
      "Wine prefix broken (Wine couldn't open a window)."),
@@ -1915,10 +1925,21 @@ def launch(_pp=None, _repaired=False):
     # the native gameinput.dll in system32/syswow64 from the game's own
     # Installers\\GameInputRedist.msi — let Wine load that one.  Keep an extra
     # WINEDLLOVERRIDES from the host env if the user explicitly set it.
-    # cryptbase=n (native): load our self-contained cryptbase.dll stub from the
-    # game dir so OpenSSL XCurl's advapi32.SystemFunction036 (RtlGenRandom)
-    # resolves; this Wine leaves it unimplemented otherwise and curl aborts.
-    overrides = ["cryptbase=n"]
+    # cryptbase=n,b (native THEN builtin): prefer our self-contained
+    # cryptbase.dll stub (installed in system32 by _install_cryptbase_in_prefix)
+    # so OpenSSL XCurl's advapi32.SystemFunction036 (RtlGenRandom) resolves —
+    # but FALL BACK to the GDK-Proton builtin cryptbase when the stub is absent.
+    # The stub lives in DATA/xodus-xcurl/openssl-set, which only exists on the
+    # maintainer's box and is never shipped, so end users had no native
+    # cryptbase; "cryptbase=n" (native-only) then left the forwarded
+    # advapi32.SystemFunction036 unresolvable → every Wine service AND
+    # explorer.exe abort on RtlGenRandom → "nodrv_CreateWindow: explorer process
+    # failed to start" → the launcher misread that symptom as a broken prefix,
+    # reset+relaunched in a loop, and finally blamed a non-existent GPU/display
+    # fault. The builtin cryptbase exports SystemFunction036 (RtlGenRandom), so
+    # the fallback boots the prefix even with no stub; PlayFab login still gets
+    # working randomness from it.
+    overrides = ["cryptbase=n,b"]
     cur = os.environ.get("WINEDLLOVERRIDES", "")
     if cur:
         overrides.append(cur)
@@ -2017,7 +2038,16 @@ def launch(_pp=None, _repaired=False):
     # token lives in DATA/msa, not the prefix.
     broken = any("prefix broken" in h.lower() for h in hits)
     no_display = any("display unavailable" in h.lower() for h in hits)
-    if broken and not no_display:
+    rng_abort = any("rng unresolved" in h.lower() for h in hits)
+    # A SystemFunction036 abort makes explorer fail to start, which *looks* like
+    # a broken prefix (nodrv_CreateWindow) but isn't — a reset won't help and the
+    # cause is neither the prefix nor the GPU. The cryptbase=n,b fallback resolves
+    # it, so just relaunch instead of looping the reset / blaming the display.
+    if rng_abort:
+        warn("The window failure came from the cryptbase RNG abort, not a broken "
+             "prefix or GPU — relaunch (builtin cryptbase now provides "
+             "RtlGenRandom).")
+    elif broken and not no_display:
         if not _repaired:
             warn("Broken Wine prefix — repairing and relaunching once…")
             reset_prefix()
