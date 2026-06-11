@@ -115,11 +115,14 @@ Use **⚙ Settings ▸ Open logs folder**
 rebuild a broken Wine prefix. The live step-by-step log is also under
 **Details** in the launcher.
 
-**Mouse dead in-game on Wayland?** Under XWayland the game doesn't get the raw
-mouse input it reads (keyboard still works). Install **gamescope**
-(`sudo pacman -S gamescope` / `sudo apt install gamescope`) and the launcher
-uses it automatically on Wayland — no flags. Set `BOL_GAMESCOPE=0` to opt out,
-or `BOL_GAMESCOPE="-f -W 2560 -H 1440"` to pass your own gamescope options.
+**Mouse (and controller) dead in-game, keyboard fine?** Fixed in v1.0.10 —
+older releases never actually installed Microsoft's native GameInput redist
+into the Wine prefix (the check matched a pre-seeded Wine builtin DLL that has
+no mouse backend), on X11 and Wayland alike. Just update and press **Play**:
+the launcher detects the broken prefix and installs the redist automatically
+(~6 s, one time). gamescope is no longer needed for this; wrap the game in it
+only if you want to, with `BOL_GAMESCOPE=1` or
+`BOL_GAMESCOPE="-f -W 2560 -H 1440"`.
 
 ## Legal
 

@@ -24,7 +24,7 @@ from pathlib import Path
 
 APP = "bedrock-on-linux"
 PRETTY = "BedrockOnLinux"
-VERSION = "1.0.9"
+VERSION = "1.0.10"
 
 HOME = Path.home()
 DATA = Path(os.environ.get("BOL_HOME", HOME / ".local/share" / APP))
@@ -1323,52 +1323,64 @@ def _install_cryptbase_in_prefix(pfx=None):
         warn(f"cryptbase install failed: {e}")
 
 
+def gameinput_redist_ok(prefix: Path):
+    """True when the NATIVE Microsoft GameInput redist is fully installed.
+    Testing system32/gameinput.dll proves nothing: wineboot pre-seeds every
+    fresh prefix with the Wine BUILTIN gameinput.dll, whose mouse/controller
+    readers need HID devices winebus never exposes — that builtin taking over
+    is exactly the "keyboard works but mouse is dead in-game" bug. The game's
+    GameInput loader only stays on the native stack when GameInputRedist.dll
+    and the redist tree exist."""
+    return ((prefix / "drive_c/windows/system32/GameInputRedist.dll").exists()
+            and (prefix / "drive_c/Program Files/Microsoft GameInput/x64"
+                          "/GameInputRedistService.exe").exists())
+
+
 def install_gameinput(prefix: Path, game_dir: Path):
-    """Install Microsoft GameInput into the prefix (the game aborts at launch
-    without gameinput.dll). The redistributable ships inside the game package
-    (Installers/GameInputRedist.msi), so no extra download. Idempotent."""
-    sys32 = prefix / "drive_c/windows/system32"
-    if (sys32 / "gameinput.dll").exists():
+    """Install the NATIVE Microsoft GameInput redist into the prefix. The
+    redistributable ships inside the game package
+    (Installers/GameInputRedist.msi), so no extra download. Idempotent, and
+    heals prefixes set up by older releases (≤ 1.0.9): those keyed the check
+    on gameinput.dll — pre-seeded as a Wine builtin by wineboot — so the MSI
+    never actually ran and the game silently fell back to the builtin
+    GameInput, which has no mouse. Runs the MSI to completion: the historic
+    "hangs forever on RtlGenRandom" only happened without the cryptbase
+    fallback override (fixed in 1.0.4), completion takes ~6 s now."""
+    if gameinput_redist_ok(prefix):
         return
     msi = game_dir / "Installers" / "GameInputRedist.msi"
     if not msi.exists():
-        warn("GameInputRedist.msi missing from the game package — GameInput "
-             "not installed; the game may show a 'missing component' dialog.")
+        warn("GameInputRedist.msi missing from the game package — native "
+             "GameInput not installed; the in-game mouse and controller "
+             "will not work (Wine's builtin GameInput has no mouse backend).")
         return
-    info("Installing Microsoft GameInput …")
+    info("Installing Microsoft GameInput (native redist — in-game mouse) …")
     LOGS.mkdir(parents=True, exist_ok=True)
     log = open(LOGS / "native-login.log", "a")
-    # msiexec writes both DLLs early but a post-install action hangs forever
-    # (RtlGenRandom unimplemented in this Wine) — poll until the DLLs exist,
-    # then kill the install, scoped to this prefix only.
-    gi64 = sys32 / "gameinput.dll"
-    gi32 = prefix / "drive_c/windows/syswow64/gameinput.dll"
     cmd, env = proton_umu_cmd("msiexec", prefix=prefix)
     env["WINEDEBUG"] = "-all"
+    # Without SystemFunction036 (RtlGenRandom) the MSI's last action hangs
+    # forever; cryptbase=n,b resolves it (stub or builtin). Older releases
+    # ran the MSI without this and killed it half-done — files copied but no
+    # registry — which is how user prefixes ended up on the builtin.
+    overrides = ["cryptbase=n,b"]
+    if env.get("WINEDLLOVERRIDES"):
+        overrides.append(env["WINEDLLOVERRIDES"])
+    env["WINEDLLOVERRIDES"] = ";".join(overrides)
     cmd += ["/i", "Z:" + str(msi).replace("/", "\\"), "/qn"]
-    proc = subprocess.Popen(cmd, env=env, stdout=log, stderr=subprocess.STDOUT,
-                            start_new_session=True)
-    end = time.time() + 240
-    while time.time() < end:
-        if proc.poll() is not None:
-            break
-        if gi64.exists() and gi32.exists():
-            time.sleep(2)                  # let the writer finish/close
-            break
-        time.sleep(2)
-    if proc.poll() is None:
-        kill_prefix_procs(prefix)
-        try:
-            proc.wait(10)
-        except Exception:
-            proc.kill()
+    try:
+        subprocess.run(cmd, env=env, stdout=log, stderr=subprocess.STDOUT,
+                       timeout=300)
+    except subprocess.TimeoutExpired:
+        warn("GameInput MSI still running after 5 min — stopping it.")
+    finally:
+        log.close()
+        kill_prefix_procs(prefix)          # reap orphaned install services
+    if gameinput_redist_ok(prefix):
+        ok("Microsoft GameInput installed (native redist)")
     else:
-        kill_prefix_procs(prefix)          # reap any orphaned install services
-    if gi64.exists():
-        ok("Microsoft GameInput installed")
-    else:
-        warn("GameInput install produced no gameinput.dll — the game may show "
-             "a 'missing component' dialog.")
+        warn("GameInput install incomplete — the in-game mouse may not work; "
+             "re-run Play or 'Install / Update' to retry.")
 
 
 def _patch_lhc_xcurl_gate(game_dir: Path):
@@ -1837,6 +1849,13 @@ def launch(_pp=None, _repaired=False, _force_x11=False, _no_gamescope=False):
         tok = fresh["refresh_token"]
     wine_apply_winegdk_prereqs()
     _install_cryptbase_in_prefix()
+    # Heal prefixes from ≤ 1.0.9 where the native GameInput redist never
+    # actually installed (the old check matched wineboot's pre-seeded builtin
+    # gameinput.dll) — without it the in-game mouse/controller are dead.
+    try:
+        install_gameinput(active_prefix(), Path(gd))
+    except Exception as e:
+        warn(f"GameInput check failed ({e}) — continuing.")
     wine_reg_set_refresh_token(tok)
     # Bypass Wine GnuTLS for the JA3-fingerprinted /device/authenticate call:
     # do it from the host Python's OpenSSL stack and persist the token where
@@ -1897,14 +1916,13 @@ def launch(_pp=None, _repaired=False, _force_x11=False, _no_gamescope=False):
         san = "".join(c.upper() if c.isalnum() else "_" for c in host)
         env["WINEGDK_XSTS_RP_" + san] = rp
         info(f"XSTS relying party override [{host}] = {rp}")
-    # Display + input backend. Under XWayland, GameInput gets no mouse or
-    # controller (it reads raw input, which XWayland doesn't deliver) — only
-    # the keyboard works. winewayland would fix that, but it disables
-    # winex11 and on some compositors fails to connect inside the
-    # pressure-vessel container → the game won't start at all. So the safe
-    # default is XWayland; winewayland is opt-in via BOL_INPUT=wayland (or
-    # the input_backend setting), and if that attempt can't open a window
-    # the post-launch handler relaunches on XWayland automatically.
+    # Display + input backend. The in-game mouse goes through the NATIVE
+    # Microsoft GameInput redist (install_gameinput) reading Win32 raw input,
+    # which works on X11 and XWayland alike — the historic "mouse dead on
+    # Wayland" was the Wine builtin gameinput.dll (no mouse backend) taking
+    # over on prefixes where the redist never installed, not a display-server
+    # issue. Default is X11/XWayland (starts everywhere); winewayland stays
+    # an experiment via BOL_INPUT=wayland (auto-falls back if no window).
     wl = os.environ.get("WAYLAND_DISPLAY")
     backend = (os.environ.get("BOL_INPUT")
                or load_settings().get("input_backend") or "auto").lower()
@@ -1912,21 +1930,21 @@ def launch(_pp=None, _repaired=False, _force_x11=False, _no_gamescope=False):
         backend = "x11"               # never auto-pick wayland (see above)
     if _force_x11:
         backend = "x11"
-    # On Wayland the in-game mouse is dead under XWayland; gamescope's nested
-    # Xwayland delivers it. Auto-use it there when installed (BOL_GAMESCOPE=0
-    # opts out; any other value is a literal gamescope option string). The
-    # post-launch handler retries without it if it can't present the game.
+    # gamescope wrapping is opt-in (BOL_GAMESCOPE=1, or a literal gamescope
+    # option string). 1.0.9 auto-enabled it on Wayland hoping its nested
+    # Xwayland would revive the mouse — field logs showed the mouse stayed
+    # dead under gamescope too (the real culprit was the builtin GameInput,
+    # above), so the auto is gone. The post-launch handler still retries
+    # without it if it can't present the game.
     gs_opt = os.environ.get("BOL_GAMESCOPE")
-    if gs_opt is not None:
-        want_gamescope = gs_opt.lower() not in ("0", "no", "off", "false", "")
-    else:
-        want_gamescope = bool(wl) and backend != "wayland"
+    want_gamescope = bool(gs_opt) and \
+        gs_opt.lower() not in ("0", "no", "off", "false")
     use_gamescope = (want_gamescope and not _no_gamescope
                      and bool(shutil.which("gamescope")))
     if use_gamescope:
         backend = "x11"
-    elif want_gamescope and gs_opt is None and not shutil.which("gamescope"):
-        info("Tip: install gamescope to fix the in-game mouse on Wayland.")
+    elif want_gamescope and not shutil.which("gamescope"):
+        warn("BOL_GAMESCOPE is set but gamescope isn't installed — ignored.")
     disp = os.environ.get("DISPLAY")
     if backend == "wayland" and wl:
         env["PROTON_ENABLE_WAYLAND"] = "1"
@@ -1942,7 +1960,7 @@ def launch(_pp=None, _repaired=False, _force_x11=False, _no_gamescope=False):
                or os.environ.get("WAYLANDDRV_PRIMARY_MONITOR"))
         if mon:
             env["WAYLANDDRV_PRIMARY_MONITOR"] = mon
-        warn("BOL_INPUT=wayland → winewayland (opt-in mouse fix). If it can't "
+        warn("BOL_INPUT=wayland → winewayland (experimental). If it can't "
              "open a window the launcher falls back to XWayland automatically; "
              "to help winewayland connect first try BOL_WAYLAND_MONITOR=<output> "
              "(e.g. eDP-1).")
@@ -1977,7 +1995,7 @@ def launch(_pp=None, _repaired=False, _force_x11=False, _no_gamescope=False):
             if wh:
                 gs_argv += ["-W", wh[0], "-H", wh[1], "-w", wh[0], "-h", wh[1]]
         cmd = gs_argv + ["--"] + cmd
-        info("Using gamescope (Wayland in-game mouse fix).")
+        info("Using gamescope (BOL_GAMESCOPE).")
     info("Launching Minecraft … sign in with Microsoft in-game, then "
          "join your server from the Servers tab.")
     glog = open(LOGS / "minecraft.log", "w")
@@ -2028,9 +2046,9 @@ def launch(_pp=None, _repaired=False, _force_x11=False, _no_gamescope=False):
         # on XWayland when available (_force_x11 guards the loop).
         if not _force_x11 and os.environ.get("DISPLAY"):
             warn("winewayland couldn't open a window — falling back to XWayland "
-                 "so the game still starts (mouse may be limited; that is the "
-                 "winewayland trade-off). Set BOL_INPUT=x11 to skip the attempt "
-                 "next time, or BOL_WAYLAND_MONITOR=<output> to help winewayland.")
+                 "so the game still starts. Set BOL_INPUT=x11 to skip the "
+                 "attempt next time, or BOL_WAYLAND_MONITOR=<output> to help "
+                 "winewayland connect.")
             return launch(_pp, _repaired=_repaired, _force_x11=True)
         warn("winewayland couldn't open a window (BOL_INPUT=wayland) and no X "
              "DISPLAY is available to fall back to — unset BOL_INPUT (or set "
