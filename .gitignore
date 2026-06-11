@@ -1,4 +1,6 @@
 dist/
+flatpak/.*.resolved.yml
+.flatpak-builder/
 *.part
 *.bol-orig
 __pycache__/

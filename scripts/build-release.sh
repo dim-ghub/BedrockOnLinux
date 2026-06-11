@@ -9,7 +9,6 @@ OUT="$SRC/dist"
 mkdir -p "$OUT"
 
 echo "== BedrockOnLinux $VER — building release artifacts =="
-python3 "$SRC/scripts/make_icon.py"
 
 # 1) .deb -----------------------------------------------------------------
 if command -v dpkg-deb >/dev/null; then
@@ -40,16 +39,29 @@ else
   echo "  – AppImage skipped (no network/FUSE) — build later with scripts/build-appimage.sh"
 fi
 
+# 4) Flatpak (best effort: needs flatpak-builder + network) ----------------
+# build-flatpak.sh self-skips (exit 0) when flatpak-builder is absent.
+if command -v flatpak-builder >/dev/null; then
+  if bash "$SRC/scripts/build-flatpak.sh" >/dev/null 2>&1; then
+    echo "  ✓ dist/BedrockOnLinux-${VER}-x86_64.flatpak"
+  else
+    echo "  – Flatpak skipped (build failed) — run scripts/build-flatpak.sh to see why"
+  fi
+else
+  echo "  – Flatpak skipped (flatpak-builder absent) — see flatpak/README.md"
+fi
+
 # keep only the release artifacts
 rm -rf "$OUT/appimagetool" "$OUT/BedrockOnLinux.AppDir" "$OUT/deb" \
-       "$OUT/portable"
+       "$OUT/portable" "$OUT/flatpak-build"
 ls "$OUT"/*.deb 2>/dev/null | grep -v "_${VER}_" | xargs -r rm -f
 ls "$OUT"/*.AppImage 2>/dev/null | grep -v "${VER}" | xargs -r rm -f
 ls "$OUT"/*portable.tar.gz 2>/dev/null | grep -v "${VER}" | xargs -r rm -f
+ls "$OUT"/*.flatpak 2>/dev/null | grep -v "${VER}" | xargs -r rm -f
 
 echo
 echo "Release artifacts in $OUT :"
-ls -1sh "$OUT" 2>/dev/null | grep -E '\.(deb|AppImage|tar\.gz)$' || true
+ls -1sh "$OUT" 2>/dev/null | grep -E '\.(deb|AppImage|tar\.gz|flatpak)$' || true
 echo
 echo "Tag & publish (needs a GitHub remote + gh):"
 echo "  git tag -a v$VER -m 'BedrockOnLinux v$VER' && git push origin v$VER"

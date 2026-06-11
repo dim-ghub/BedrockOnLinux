@@ -12,7 +12,7 @@ rm -rf "$APPDIR"
 mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/share/applications" \
          "$APPDIR/usr/share/icons/hicolor/256x256/apps" "$OUT"
 
-[[ -f "$SRC/data/icon.png" ]] || python3 "$SRC/scripts/make_icon.py"
+[[ -f "$SRC/data/icon.png" ]] || { echo "data/icon.png missing" >&2; exit 1; }
 install -m755 "$SRC/bedrock-on-linux" "$APPDIR/usr/bin/bedrock-on-linux"
 mkdir -p "$APPDIR/usr/bin/data"
 cp "$SRC/data/icon.png" "$APPDIR/usr/bin/data/icon.png"

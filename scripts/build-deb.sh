@@ -16,7 +16,7 @@ mkdir -p "$OUT" \
   "$PKG/usr/share/icons/hicolor/256x256/apps" \
   "$PKG/usr/share/doc/bedrock-on-linux"
 
-[[ -f "$SRC/data/icon.png" ]] || python3 "$SRC/scripts/make_icon.py"
+[[ -f "$SRC/data/icon.png" ]] || { echo "data/icon.png missing" >&2; exit 1; }
 
 install -m755 "$SRC/bedrock-on-linux" "$PKG/usr/lib/bedrock-on-linux/bedrock-on-linux"
 install -m644 "$SRC/data/icon.png"    "$PKG/usr/lib/bedrock-on-linux/data/icon.png"

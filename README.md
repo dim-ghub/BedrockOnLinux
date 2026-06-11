@@ -49,7 +49,17 @@ tar xzf bedrock-on-linux-*-portable.tar.gz && cd bedrock-on-linux
 ./bedrock-on-linux gui
 ```
 
-> Needs: `python3`, `python3-tk`, `tar`, `zstd`.
+**Flatpak**
+
+```bash
+flatpak install --user ./BedrockOnLinux-*-x86_64.flatpak
+flatpak run io.github.wyze3306.BedrockOnLinux
+```
+
+> Build: `scripts/build-flatpak.sh`. The manifest is Flathub-ready — see
+> [`flatpak/README.md`](flatpak/README.md) for testing and the submission steps.
+
+> Needs (`.deb`/AppImage/portable): `python3`, `python3-tk`, `tar`, `zstd`.
 > `bedrock-on-linux doctor` reports anything missing.
 
 ## Play
@@ -105,6 +115,12 @@ Use **⚙ Settings ▸ Open logs folder**
 rebuild a broken Wine prefix. The live step-by-step log is also under
 **Details** in the launcher.
 
+**Mouse dead in-game on Wayland?** Under XWayland the game doesn't get the raw
+mouse input it reads (keyboard still works). Install **gamescope**
+(`sudo pacman -S gamescope` / `sudo apt install gamescope`) and the launcher
+uses it automatically on Wayland — no flags. Set `BOL_GAMESCOPE=0` to opt out,
+or `BOL_GAMESCOPE="-f -W 2560 -H 1440"` to pass your own gamescope options.
+
 ## Legal
 
 BedrockOnLinux ships **no Minecraft files** — it is a compatibility launcher.
@@ -117,6 +133,7 @@ free software under their own licenses. Realms is not supported.
 
 ```bash
 scripts/build-release.sh        # .deb + AppImage + portable tarball → dist/
+scripts/build-flatpak.sh        # Flatpak bundle → dist/ (needs flatpak-builder)
 ```
 
 ## License

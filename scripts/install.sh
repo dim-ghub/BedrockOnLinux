@@ -33,4 +33,4 @@ case ":$PATH:" in
   *":$BIN:"*) ;;
   *) echo "Note: add ~/.local/bin to PATH:  echo 'export PATH=\$HOME/.local/bin:\$PATH' >> ~/.bashrc" ;;
 esac
-echo "Run:  bedrock-on-linux setup --game-dir \"/path/to/Minecraft for Windows\""
+echo "Run:  bedrock-on-linux gui"

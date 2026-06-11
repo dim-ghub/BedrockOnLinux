@@ -1,0 +1,126 @@
+# Flathub manifest for BedrockOnLinux.
+#
+# Two things make this more than a plain Python app:
+#   1. The GUI is Tkinter, which org.freedesktop.Platform does not ship —
+#      a self-contained Tcl + Tk + CPython is bundled.
+#   2. The game runs through umu-launcher → pressure-vessel, a sub-sandbox
+#      created via the Flatpak portal — hence --talk-name=org.freedesktop.Flatpak,
+#      --allow=devel and --allow=multiarch (the Lutris/Bottles/Heroic recipe).
+#
+# Local test build: scripts/build-flatpak.sh (swaps the app source for the
+# working tree). Submission steps + permission rationale: flatpak/README.md.
+app-id: io.github.wyze3306.BedrockOnLinux
+runtime: org.freedesktop.Platform
+runtime-version: '24.08'
+sdk: org.freedesktop.Sdk
+command: bedrock-on-linux
+
+finish-args:
+  # GPU (Vulkan) + game controllers
+  - --device=all
+  # XWayland is the default display backend; winewayland is opt-in (BOL_INPUT=wayland)
+  - --socket=x11
+  - --socket=wayland
+  - --socket=pulseaudio
+  - --share=ipc
+  # engine/game downloads, Microsoft sign-in, multiplayer
+  - --share=network
+  # the launcher's data dir (shared with non-Flatpak installs) and the
+  # Steam-compat dirs umu/Proton expect
+  - --filesystem=xdg-data/bedrock-on-linux:create
+  - --filesystem=xdg-data/umu:create
+  - --filesystem=~/.steam:create
+  # umu/pressure-vessel spawns its Steam Linux Runtime sub-sandbox through the
+  # Flatpak portal; Wine needs ptrace (devel) and 32-bit code (multiarch)
+  - --talk-name=org.freedesktop.Flatpak
+  - --allow=devel
+  - --allow=multiarch
+
+cleanup:
+  - /include
+  - /share/man
+  - /share/doc
+  - /lib/pkgconfig
+  - '*.a'
+  - '*.la'
+
+modules:
+  - name: tcl
+    buildsystem: autotools
+    subdir: unix
+    config-opts:
+      - --enable-shared
+      - --enable-threads
+    post-install:
+      - chmod -R u+w /app/lib
+    sources:
+      - type: archive
+        url: https://prdownloads.sourceforge.net/tcl/tcl8.6.14-src.tar.gz
+        sha256: 5880225babf7954c58d4fb0f5cf6279104ce1cd6aa9b71e9a6322540e1c4de66
+
+  - name: tk
+    buildsystem: autotools
+    subdir: unix
+    config-opts:
+      - --enable-shared
+      - --enable-threads
+      - --with-tcl=/app/lib
+      - --with-x
+    sources:
+      - type: archive
+        url: https://prdownloads.sourceforge.net/tcl/tk8.6.14-src.tar.gz
+        sha256: 8ffdb720f47a6ca6107eac2dd877e30b0ef7fac14f3a84ebbd0b3612cee41a94
+
+  # Self-contained CPython with tkinter, so the launcher's
+  # `#!/usr/bin/env python3` resolves to an interpreter that has Tk
+  # (/app/bin is first on PATH). Python 3.12 dropped --with-tcltk-*;
+  # Tcl/Tk is located through TCLTK_CFLAGS / TCLTK_LIBS.
+  - name: python3
+    buildsystem: autotools
+    config-opts:
+      - --enable-shared
+      - --without-static-libpython
+      - --with-ensurepip=no
+    build-options:
+      env:
+        TCLTK_CFLAGS: -I/app/include
+        TCLTK_LIBS: -L/app/lib -ltcl8.6 -ltk8.6
+        LDFLAGS: -Wl,-rpath,/app/lib
+    post-install:
+      # fail the build now (not at first run) if tkinter didn't link
+      - /app/bin/python3 -c "import tkinter"
+    cleanup:
+      - /lib/python3.12/test
+      - /lib/python3.12/idlelib
+      - /lib/python3.12/turtledemo
+    sources:
+      - type: archive
+        url: https://www.python.org/ftp/python/3.12.8/Python-3.12.8.tar.xz
+        sha256: c909157bb25ec114e5869124cc2a9c4a4d4c1e957ca4ff553f1edc692101154e
+
+  # zstd CLI for the one .pkg.tar.zst (libcurl) the launcher extracts;
+  # Python's tarfile can't read zstd and the runtime ships no unzstd.
+  - name: zstd
+    buildsystem: simple
+    build-commands:
+      - make -C programs zstd
+      - install -Dm755 programs/zstd /app/bin/zstd
+      - ln -sf zstd /app/bin/unzstd
+    sources:
+      - type: archive
+        url: https://github.com/facebook/zstd/releases/download/v1.5.6/zstd-1.5.6.tar.gz
+        sha256: 8c29e06cf42aacc1eafc4077ae2ec6c6fcb96a626157e0593d5e82a34fd403c1
+
+  - name: bedrock-on-linux
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 bedrock-on-linux /app/bin/bedrock-on-linux
+      - install -Dm644 data/icon.png /app/share/icons/hicolor/256x256/apps/io.github.wyze3306.BedrockOnLinux.png
+      - install -Dm644 flatpak/io.github.wyze3306.BedrockOnLinux.desktop /app/share/applications/io.github.wyze3306.BedrockOnLinux.desktop
+      - install -Dm644 flatpak/io.github.wyze3306.BedrockOnLinux.metainfo.xml /app/share/metainfo/io.github.wyze3306.BedrockOnLinux.metainfo.xml
+    sources:
+      # Pinned release. After tagging, set commit to:
+      #   git rev-parse v1.0.9^{commit}
+      - type: git
+        url: https://github.com/Wyze3306/BedrockOnLinux.git
+        tag: v1.0.9

@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.wyze3306.BedrockOnLinux</id>
+  <launchable type="desktop-id">io.github.wyze3306.BedrockOnLinux.desktop</launchable>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+
+  <name>BedrockOnLinux</name>
+  <summary>Run Minecraft Bedrock on Linux</summary>
+
+  <description>
+    <p>
+      BedrockOnLinux installs and runs the Windows (GDK) edition of Minecraft
+      Bedrock on Linux. One app does everything automatically:
+    </p>
+    <ul>
+      <li>downloads the Minecraft version you pick;</li>
+      <li>fetches a GDK-Proton built from a WineGDK fork that implements XUser
+          and request signing, so you sign in to Microsoft inside the game —
+          no relay, no proxy;</li>
+      <li>applies the binary patches the game needs to start and to join online
+          Bedrock servers;</li>
+      <li>fixes curl/SSL, then launches the game.</li>
+    </ul>
+    <p>
+      Sign in, open Play &#8226; Servers, and join native Bedrock servers
+      (Hive, CubeCraft, …) or crossplay/Geyser servers. No game files are
+      shipped; you supply your own — you must own Minecraft.
+    </p>
+  </description>
+
+  <categories>
+    <category>Game</category>
+    <category>ActionGame</category>
+  </categories>
+
+  <keywords>
+    <keyword>minecraft</keyword>
+    <keyword>bedrock</keyword>
+    <keyword>gdk</keyword>
+    <keyword>wine</keyword>
+    <keyword>proton</keyword>
+    <keyword>mcbe</keyword>
+  </keywords>
+
+  <url type="homepage">https://github.com/Wyze3306/BedrockOnLinux</url>
+  <url type="bugtracker">https://github.com/Wyze3306/BedrockOnLinux/issues</url>
+  <url type="vcs-browser">https://github.com/Wyze3306/BedrockOnLinux</url>
+
+  <developer id="io.github.wyze3306">
+    <name>Wyze3306</name>
+  </developer>
+
+  <branding>
+    <color type="primary" scheme_preference="light">#84d160</color>
+    <color type="primary" scheme_preference="dark">#23262e</color>
+  </branding>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>The launcher: pick a version, sign in, play</caption>
+      <image>https://raw.githubusercontent.com/Wyze3306/BedrockOnLinux/v1.0.9/screenshot.png</image>
+    </screenshot>
+  </screenshots>
+
+  <content_rating type="oars-1.1">
+    <content_attribute id="social-chat">moderate</content_attribute>
+    <content_attribute id="money-purchasing">mild</content_attribute>
+  </content_rating>
+
+  <releases>
+    <release version="1.0.9" date="2026-06-11">
+      <description>
+        <p>Flatpak packaging, plus two Wayland input fixes:</p>
+        <ul>
+          <li>opt-in gamescope (BOL_GAMESCOPE=1) so the in-game mouse works on
+              Wayland sessions, where XWayland otherwise drops it;</li>
+          <li>the opt-in winewayland backend now falls back to XWayland
+              automatically when it cannot open a window, so the game always
+              starts.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.0.8" date="2026-06-11">
+      <description>
+        <p>Fixes for the opt-in winewayland backend and safer prefix repair.</p>
+      </description>
+    </release>
+  </releases>
+</component>

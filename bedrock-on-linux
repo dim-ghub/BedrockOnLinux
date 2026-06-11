@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 import re
+import shlex
 import shutil
 import struct
 import subprocess
@@ -16,7 +17,6 @@ import tarfile
 import threading
 import time
 import urllib.parse
-import urllib.parse
 import urllib.request
 import urllib.error
 import zipfile
@@ -24,7 +24,7 @@ from pathlib import Path
 
 APP = "bedrock-on-linux"
 PRETTY = "BedrockOnLinux"
-VERSION = "1.0.8"
+VERSION = "1.0.9"
 
 HOME = Path.home()
 DATA = Path(os.environ.get("BOL_HOME", HOME / ".local/share" / APP))
@@ -45,68 +45,42 @@ GAME_ARCHIVE_REPO = "bubbles-wow/mcbe-gdk-unpack-archive"
 MINGW_CURL = "https://mirror.msys2.org/mingw/mingw64/mingw-w64-x86_64-curl-8.17.0-1-any.pkg.tar.zst"
 CACERT_URL = "https://curl.se/ca/cacert.pem"
 
-# Native in-game login (no ProxyPass). WineGDK's XUser (Weather-OS/WineGDK
-# PR #33) has no sign-in UI: it reads an MSA OAuth refresh token from the
-# prefix registry and does the Xbox Live exchange itself. We only run the
-# device-code flow (pure urllib, no crypto) and seed that token. The
-# client_id MUST equal WineGDK's hardcoded msaAppId or its refresh is
-# rejected. See docs/native-login.md.
-MSA_CLIENT_ID = "0000000048183522"     # Bedrock Android (== ProxyPass / gophertunnel default; matches WineGDK xuser-olivi XUser.c)
+# In-game Microsoft login: WineGDK's XUser has no sign-in UI — it reads an
+# MSA OAuth refresh token from the prefix registry (WINEGDK_REG) and does the
+# Xbox Live exchange itself. The launcher only runs the device-code flow and
+# seeds that token. MSA_CLIENT_ID must equal WineGDK's hardcoded msaAppId or
+# the refresh is rejected.
+MSA_CLIENT_ID = "0000000048183522"     # Bedrock Android (matches WineGDK XUser.c)
 MSA_SCOPE = "service::user.auth.xboxlive.com::MBI_SSL"
 MSA_CONNECT = "https://login.live.com/oauth20_connect.srf"
 MSA_TOKEN = "https://login.live.com/oauth20_token.srf"
 WINEGDK_REG = r"Software\Wine\WineGDK"  # value RefreshToken (REG_SZ)
 
-# Build a GDK-Proton from the user's WineGDK fork (XUser + signing) so the
-# Microsoft login works in-game. Source is cloned/updated here and built;
-# the result is overlaid onto a stock GDK-Proton. See docs/build-xuser-engine.md.
+# The WineGDK fork (XUser + request signing) the engine is built from when no
+# prebuilt asset is available.
 WINEGDK_REPO = "https://github.com/Wyze3306/WineGDK.git"
-# xuser-olivi (birdayz, mirrored): builds on olivi-r XUser PR #33 and adds
-# the full chain past the title.auth wall — XStore licence, XServiceBroker,
-# XSAPI plumbing + a runtime isSignedIn memory patch + credential-gate
-# bypass. Reported as working: Xbox sign-in + Servers tab. Other branches
-# kept (master = our earlier work; xbox-live-dev = ChristopherHX mirror).
 WINEGDK_BRANCH = "master"
-# OSS replacements for the game's GDK Xbox-Live DLLs (ChristopherHX). These
-# + the xbox-live-dev WineGDK are what got past the title.auth wall.
+# OSS replacements for the game's GDK Xbox-Live DLLs (minecraft-linux project).
 GDK_DEPS_URL = "https://github.com/minecraft-linux/mcpelauncher-gdk-dependencies/releases/download/v0.0.0"
 GDK_DEPS_DLLS = ("libHttpClient.GDK.dll", "XCurl.dll")
-# An OpenSSL-backed libcurl (+ full DLL dep set + a self-contained cryptbase
-# RtlGenRandom stub) shipped here is renamed XCurl.dll in the game dir so
-# Minecraft's PlayFab traffic goes over OpenSSL TLS, bypassing Wine secur32 and
-# the Azure Front Door FIN wall that breaks native (no-ProxyPass) sign-in.
-# The set is NOT bundled (20 MB); ensure_openssl_xcurl_set() downloads it once
-# from the app's own releases (asset openssl-xcurl-set-<rev>.tar.gz) — without
-# it, end users keep the Schannel XCurl.dll and online/PlayFab login fails.
-# Republish with scripts/package-openssl-xcurl.sh and update OPENSSL_XCURL_REV.
+# OpenSSL libcurl + CA-shim + cryptbase stub set: installed as XCurl.dll so
+# Minecraft's PlayFab traffic goes over OpenSSL TLS instead of Wine secur32
+# (whose handshake Azure Front Door silently FINs → endless sign-in loop).
+# Too big to bundle (20 MB) — downloaded once from the app's releases as
+# openssl-xcurl-set-<rev>.tar.gz. Republish: scripts/package-openssl-xcurl.sh.
 OPENSSL_XCURL_SET = DATA / "xodus-xcurl" / "openssl-set"
 OPENSSL_XCURL_REV = "56a296acc12a"
 WINEGDK_SRC = DATA / "winegdk-src"
 WINEGDK_OUT = PROTON_DIR / "GDK-Proton-xuser"
-# Prebuilt engine source. End users download a ready-built GDK-Proton-xuser
-# from the app's own GitHub releases instead of compiling a full Wine; the
-# launcher scans for an asset named GDK-Proton-xuser-<build-rev>.tar.gz.
-# Only when none is published does it fall back to a from-source build.
-# Publish a new one with scripts/package-engine.sh (see that script's header).
+# Prebuilt engine: users download GDK-Proton-xuser-<build-rev>.tar.gz from the
+# app's releases instead of compiling Wine; source build is the fallback.
+# Republish: scripts/package-engine.sh.
 WINEGDK_PREBUILT_REPO = "Wyze3306/BedrockOnLinux"
 # Bump when the build/packaging method changes → forces a clean rebuild.
 WINEGDK_BUILD_REV = "wow64-archs"
 
-# Direct package list for a 64-bit WineGDK build that can display/run the
-# game — avoids `apt build-dep wine` (needs deb-src, absent on Mint/LMDE).
-WINE_BUILD_PKGS = (
-    "flex bison gcc-mingw-w64-x86-64 gcc-mingw-w64-i686 pkg-config "
-    "libx11-dev libxext-dev libxrandr-dev libxrender-dev libxi-dev "
-    "libxcursor-dev libxcomposite-dev libxinerama-dev libxfixes-dev "
-    "libxxf86vm-dev libfreetype-dev libfontconfig1-dev libgl1-mesa-dev "
-    "libvulkan-dev libgnutls28-dev libpulse-dev libasound2-dev "
-    "libudev-dev libsdl2-dev libusb-1.0-0-dev libpcap-dev "
-    "libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev")
-# Bump when the build/packaging method changes → forces a clean rebuild.
-WINEGDK_BUILD_REV = "wow64-archs"
-
-# Direct package list for a 64-bit WineGDK build that can display/run the
-# game — avoids `apt build-dep wine` (needs deb-src, absent on Mint/LMDE).
+# Build deps for the from-source fallback — a direct list, because
+# `apt build-dep wine` needs deb-src entries Mint/LMDE don't ship.
 WINE_BUILD_PKGS = (
     "flex bison gcc-mingw-w64-x86-64 gcc-mingw-w64-i686 pkg-config "
     "libx11-dev libxext-dev libxrandr-dev libxrender-dev libxi-dev "
@@ -182,16 +156,13 @@ def load_settings():
             s = json.loads(SETTINGS.read_text())
         except Exception:
             s = {}
-    # This branch is in-game login only (no ProxyPass): always build/use
-    # the WineGDK fork unless the user pointed at another custom build.
+    # Always use the WineGDK engine unless the user pointed at a custom build.
     s.setdefault("native_login", True)
     if not s.get("proton_dir") and not s.get("proton_url"):
         s.setdefault("proton_source", "winegdk")
         s.setdefault("winegdk_repo", WINEGDK_REPO)
         s.setdefault("winegdk_branch", WINEGDK_BRANCH)
-        # Pin to the single fork branch (the user's Wyze3306/WineGDK
-        # xbox-live-dev). If a stale repo/branch was persisted, repoint and
-        # force a clean rebuild from the new source.
+        # A stale persisted repo/branch is repointed and forces a clean rebuild.
         if s.get("winegdk_repo") != WINEGDK_REPO \
                 or s.get("winegdk_branch") != WINEGDK_BRANCH:
             s["winegdk_repo"] = WINEGDK_REPO
@@ -352,11 +323,9 @@ def apply_patch(path: Path, off, expect, new, what, strict=True, relax=False):
                 die(msg)
             warn(msg)
             return False
-        # relax: the offset comes from a structural lookup (PE export table),
-        # so it IS the real function entry — only the prologue varies between
-        # Wine/compiler builds. The stub (return 0) is safe to plant over any
-        # prologue, so patch anyway instead of skipping (which left the game
-        # to crash later on the unimplemented stub).
+        # relax: the offset comes from the PE export table, so it IS the
+        # function entry — only the prologue varies between Wine builds.
+        # A return-0 stub is safe over any prologue, so patch anyway.
         warn(f"{what}: prologue {got} at 0x{off:x} differs — stubbing anyway.")
     _backup_once(path)
     raw[off:off + len(new)] = new
@@ -611,6 +580,19 @@ def _vt(v):
         return (0,)
 
 
+def _screen_wh():
+    """Primary screen WxH from xrandr (for gamescope sizing), or None."""
+    if not shutil.which("xrandr"):
+        return None
+    try:
+        out = subprocess.run(["xrandr"], capture_output=True, text=True,
+                             timeout=5).stdout
+    except Exception:
+        return None
+    m = re.search(r"current\s+(\d+)\s+x\s+(\d+)", out)
+    return (m.group(1), m.group(2)) if m else None
+
+
 def _pkill(pattern):
     """Best-effort kill of processes whose cmdline matches `pattern`."""
     if shutil.which("pkill"):
@@ -756,25 +738,14 @@ class NativeAuth:
 
 
 def xbl_preauth(msa_access_token):
-    """Do EVERY Xbox Live auth call from the host's OpenSSL stack and persist
-    the results where xgameruntime.dll picks them up — device token + user
-    token + SISU AuthorizationToken (for PlayFab) + uhs.
+    """Run the whole Xbox Live auth chain (device + user + SISU tokens) from
+    the host's OpenSSL stack and persist it as winegdk-preauth/device.json,
+    where xgameruntime.dll short-circuits its own HTTP calls.
 
-    Why: Wine 11.1's secur32 GnuTLS sends a ClientHello fingerprinted by
-    Microsoft Azure as a non-Schannel client. EVERY *.auth.xboxlive.com and
-    sisu.xboxlive.com call TCP-RSTs after the body lands. The same requests
-    from Linux curl (OpenSSL) return 200. Bypassing only /device/authenticate
-    still leaves /user/authenticate, /xsts/authorize and sisu/authorize on
-    the Wine side and they all RST too, so MC's XUserAddAsync still ends
-    with 0x80072746. Pre-fetch the whole chain here and hand it to the
-    C side via $WINEGDK_PREAUTH_DEVICE; DeviceAuth_Initialize +
-    XUserGetTokenAndSignatureProvider then short-circuit every xboxlive HTTP
-    call.
-
-    Persisted as a single JSON in $WINEGDK_PREAUTH_DIR/device.json so the
-    C side can mmap it without round-tripping through the registry.
-    Returns True if at least the device token landed, False otherwise
-    (caller falls back to the Wine-side path)."""
+    Needed because Azure TCP-RSTs every *.auth.xboxlive.com / sisu call made
+    through Wine's GnuTLS (fingerprinted as non-Schannel) — the same requests
+    from the host succeed. Returns True if at least the device token landed;
+    False lets the caller fall back to the Wine-side path."""
     import base64, uuid as _uuid
     try:
         from cryptography.hazmat.primitives.asymmetric import ec
@@ -865,10 +836,7 @@ def xbl_preauth(msa_access_token):
     j = r.json()
     device_token = j["Token"]
 
-    # ---- 2. /user/authenticate ----
-    # Needs the MSA access token (caller passes it). Format follows
-    # Token.c RequestUserToken — sit on user.auth.xboxlive.com with
-    # AuthMethod=RPS and RpsTicket="t=<access_token>".
+    # ---- 2. /user/authenticate (AuthMethod=RPS, RpsTicket="t=<token>") ----
     user_token = None
     user_token_expiry = None
     if msa_access_token:
@@ -892,11 +860,8 @@ def xbl_preauth(msa_access_token):
             warn(f"xbl_preauth: user.auth POST failed: {e}")
 
     # ---- 3a. sisu /authorize for http://xboxlive.com ----
-    # This RP gives back the full DisplayClaims (xid, gtg, agg, ...) MC needs
-    # to populate the XUser handle. The xgameruntime.dll LoadDefaultUser path
-    # normally extracts these from a second xsts.auth.xboxlive.com call — but
-    # xsts.auth RSTs Wine the same way device.auth and user.auth do, so we
-    # land them here instead.
+    # Returns the DisplayClaims (xid, gtg, agg, …) LoadDefaultUser needs to
+    # populate the XUser handle (its own xsts.auth call would RST under Wine).
     def _sisu(rp):
         if not msa_access_token: return None
         try:
@@ -942,12 +907,9 @@ def xbl_preauth(msa_access_token):
     except (KeyError, IndexError, TypeError):
         pass
 
-    # ---- 3c. sisu /authorize for the multiplayer RP MC pins when JOINING a
-    # third-party / external server. The game requests an XSTS token for
-    # https://multiplayer.minecraft.net/ via XUserGetTokenAndSignature; without
-    # a pre-minted one xgameruntime falls back to a live SISU call which RSTs
-    # under Wine GnuTLS, so the token comes back empty and the join fails (the
-    # ping still works -- it's the join handshake's identity chain that's missing).
+    # ---- 3c. sisu /authorize for the multiplayer RP, used when joining a
+    # third-party server — without a pre-minted token the live SISU call RSTs
+    # and the join fails (pings still work).
     mp_sisu = _sisu("https://multiplayer.minecraft.net/") or {}
     mp_auth = mp_sisu.get("AuthorizationToken", {}) if mp_sisu else {}
     mp_rp = "https://multiplayer.minecraft.net/" if mp_auth.get("Token") else None
@@ -1013,8 +975,8 @@ def xbl_preauth(msa_access_token):
 
 
 def wine_reg_set_refresh_token(token):
-    """Seed the MSA refresh token where WineGDK's XUser (PR #33) reads it:
-    HKLM\\Software\\Wine\\WineGDK 'RefreshToken'. Written through the same
+    """Seed the MSA refresh token where WineGDK's XUser reads it
+    (HKLM\\Software\\Wine\\WineGDK 'RefreshToken'), written through the same
     proton/umu runtime (and prefix) used to launch the game."""
     cmd, env = proton_umu_cmd("reg")
     cmd += ["add", "HKLM\\" + WINEGDK_REG, "/v", "RefreshToken",
@@ -1035,16 +997,9 @@ def wine_reg_set_refresh_token(token):
 
 
 def wine_apply_winegdk_prereqs():
-    """Prereqs for the xuser-olivi WineGDK path: set ConsoleMode=8 so
-    the game takes its XSAPI-eligible code path (value 1 = Win32 PC
-    flips thirdPartyServersStatus to Win32DevBuildWarning and blocks
-    the Servers tab as a 'dev build' — birdayz used 8 for this exact
-    reason).  The 'need Microsoft account' banner that XSAPI's
-    incomplete init normally leaves on screen is handled separately by
-    the HBUI wB() bypass in install_gdk_xbox_dlls.
-
-    Also inject the WindowsAppRuntime UI-mute env vars into
-    HKCU\\Environment so Wine inherits them inside the prefix
+    """Registry prereqs: ConsoleMode=8 (console enum → the XSAPI code path;
+    1 = Win32 PC would block the Servers tab as a 'dev build'), TLS 1.2
+    forced, and the WindowsAppRuntime UI-mute env vars in HKCU\\Environment
     (pressure-vessel filters MICROSOFT_* out of the host env)."""
     LOGS.mkdir(parents=True, exist_ok=True)
     log = open(LOGS / "native-login.log", "a")
@@ -1058,14 +1013,9 @@ def wine_apply_winegdk_prereqs():
             warn(f"reg add {args[0]} failed: {e}")
     _regadd(r"HKLM\Software\Microsoft\Windows NT\CurrentVersion\OEM",
             "/v", "ConsoleMode", "/t", "REG_DWORD", "/d", "8")
-    # PlayFab (Azure) TLS handshake fails under Wine 11.1 / GnuTLS when MC's
-    # libHttpClient negotiates TLS 1.3 — server returns a 7-byte fatal Alert
-    # and InitializeSecurityContext bails with 0x80090304 (SEC_E_INTERNAL_ERROR).
-    # Forcing TLS 1.2 only via DefaultSecureProtocols (0xA00) makes the
-    # handshake succeed for both the SISU/XSTS path and Minecraft's POST
-    # /Client/LoginWithXbox.  Without this MC sign-in loops forever because
-    # every PlayFab POST is rejected at the transport layer before it ships
-    # any bytes of the JSON body.
+    # Azure rejects Wine GnuTLS' TLS 1.3 handshake (7-byte fatal Alert →
+    # 0x80090304); forcing TLS 1.2 via DefaultSecureProtocols lets the
+    # SISU/XSTS and PlayFab POSTs through.
     _regadd(r"HKLM\Software\Microsoft\Windows\CurrentVersion\Internet Settings\WinHttp",
             "/v", "DefaultSecureProtocols", "/t", "REG_DWORD", "/d", "2560")
     _regadd(r"HKLM\Software\Microsoft\SchannelTLS\Protocols\TLS 1.3\Client",
@@ -1189,7 +1139,7 @@ def fix_curl_ssl(game_dir: Path):
 
 
 def install_gdk_xbox_dlls(game_dir: Path):
-    """Drop ChristopherHX's OSS GDK Xbox-Live DLLs into the game folder
+    """Drop the OSS GDK Xbox-Live DLLs into the game folder
     (libHttpClient.GDK.dll, XCurl.dll), backing up originals. The XCurl
     backup also makes fix_curl_ssl skip its libcurl swap so this one
     stays. Idempotent."""
@@ -1211,19 +1161,12 @@ def install_gdk_xbox_dlls(game_dir: Path):
 
 
 def _patch_hbui_signin_gate(game_dir: Path):
-    """Bypass HBUI's 'You need a Microsoft account to play on a server'
-    banner that blocks the Servers tab even when our SISU/PlayFab auth
-    is working underneath.  The banner is rendered by a React component
-    fed by a derived facet (function `wB()` in the minified JS bundle)
-    that returns "not-signed-in" whenever C++ reports the user as
-    'isLoggedInWithMicrosoftAccount=false' — which it does on Wine
-    because XSAPI's social manager never completes init.  Patch wB to
-    return "" early; all switches consuming the reason fall through to
-    `default: return null`, suppressing the banner AND the gating that
-    blocks Servers / Realms / Marketplace.  Idempotent: skips when the
-    early return is already there, or when the bundle doesn't match
-    (Minecraft update with rebundled JS — pattern will need to be
-    re-found)."""
+    """Bypass HBUI's 'You need a Microsoft account' banner that blocks the
+    Servers tab: its derived facet (wB() in the minified JS bundle) reports
+    not-signed-in because XSAPI never completes init under Wine, even though
+    the SISU/PlayFab auth works. An early `return ""` makes every consumer
+    fall through to `default: return null`. Idempotent; skips silently when
+    a Minecraft update rebundles the JS (pattern must then be re-found)."""
     import glob
     for js in glob.glob(str(game_dir / "data/gui/dist/hbui/index-*.js")):
         try:
@@ -1245,15 +1188,10 @@ def _patch_hbui_signin_gate(game_dir: Path):
 
 
 def ensure_openssl_xcurl_set():
-    """Fetch + unpack the OpenSSL XCurl set into OPENSSL_XCURL_SET on first use.
-
-    The 20 MB DLL stack (OpenSSL libcurl + CA-injecting shim + cryptbase stub)
-    is too big to bundle, so it lives as a release asset
-    openssl-xcurl-set-<rev>.tar.gz on the app's own GitHub releases — the same
-    pattern as the prebuilt engine. Idempotent: skips when the installed set
-    already matches OPENSSL_XCURL_REV (a .rev marker). Any network/IO failure
-    degrades quietly — _install_openssl_xcurl() then keeps the Schannel XCurl
-    and warns, exactly as before this set existed."""
+    """Fetch + unpack the OpenSSL XCurl set (release asset, 20 MB) into
+    OPENSSL_XCURL_SET on first use. Idempotent via a .rev marker; any
+    network/IO failure degrades quietly — _install_openssl_xcurl() then
+    keeps the Schannel XCurl and warns."""
     marker = OPENSSL_XCURL_SET / ".rev"
     have = (OPENSSL_XCURL_SET / "libcurl-4.dll").exists() and \
            (OPENSSL_XCURL_SET / "xcurl-cashim.dll").exists()
@@ -1305,26 +1243,13 @@ def ensure_openssl_xcurl_set():
 
 
 def _install_openssl_xcurl(game_dir: Path):
-    """Make Minecraft's PlayFab HTTP go over OpenSSL instead of Wine secur32.
+    """Route Minecraft's PlayFab HTTP over OpenSSL instead of Wine secur32
+    (whose Schannel TLS Azure Front Door silently FINs → login loops).
 
-    The shipped GDK XCurl.dll uses Schannel, so its TLS rides Wine secur32 and
-    Azure Front Door silently FINs every PlayFab POST (login loops). We install
-    an OpenSSL-backed libcurl instead — it does its own TLS end to end and
-    reaches PlayFab (verified: real HTTP 400 JSON where Schannel got 0 bytes).
-
-    Three pieces land in the game dir:
-      • XCurl.dll      — a thin CA-injecting shim (xcurl-cashim.dll). The game's
-        libHttpClient CurlProvider never sets CURLOPT_CAINFO, and this libcurl
-        ignores CURL_CA_BUNDLE/SSL_CERT_FILE env + has no app-dir CA auto-search
-        under Wine, so cert validation (enforced in-game) would fail. The shim
-        forwards every curl_* call to the real libcurl but injects
-        CURLOPT_CAINFO=<dir>\\cacert.pem at curl_easy_init. Verified: a verify=ON
-        multi-interface POST to PlayFab returns HTTP 400 (TLS validated).
-      • xcurl_real.dll — the actual OpenSSL libcurl the shim forwards to.
-      • cacert.pem + the libssl/libcrypto/zlib/… dependency set.
-    The cryptbase RNG stub (advapi32.SystemFunction036) is installed separately
-    into the prefix system32 by _install_cryptbase_in_prefix(); launch() adds
-    WINEDLLOVERRIDES=cryptbase=n,b (native stub, else GDK-Proton builtin).
+    Lands in the game dir: XCurl.dll = a CA-injecting shim (libHttpClient
+    never sets CURLOPT_CAINFO, so the shim injects <dir>\\cacert.pem at
+    curl_easy_init and forwards everything else), xcurl_real.dll = the real
+    OpenSSL libcurl, plus cacert.pem and the libssl/zlib dependency set.
     Idempotent."""
     ensure_openssl_xcurl_set()                 # fetch the 20 MB set on first use
     s = OPENSSL_XCURL_SET
@@ -1368,13 +1293,10 @@ def _install_openssl_xcurl(game_dir: Path):
 
 
 def _install_cryptbase_in_prefix(pfx=None):
-    """Install the self-contained cryptbase.dll stub into the active prefix's
-    system32. advapi32 forwards SystemFunction036 (RtlGenRandom) to cryptbase,
-    and Wine resolves that forward from system32 (advapi32's own directory) —
-    NOT the game dir — so the OpenSSL XCurl that libHttpClient LoadLibrary's
-    internally only gets its RNG if the stub is here. This Wine leaves
-    SystemFunction036 unimplemented otherwise → curl aborts at first TLS RNG
-    call. Backs up any pre-existing cryptbase once; idempotent (sha compare)."""
+    """Install the cryptbase.dll RNG stub into the prefix system32 — Wine
+    resolves advapi32's SystemFunction036 (RtlGenRandom) forward from there,
+    not the game dir, and the OpenSSL XCurl aborts at its first TLS RNG call
+    without it. Backs up any existing cryptbase once; idempotent."""
     src = OPENSSL_XCURL_SET / "cryptbase.dll"
     if not src.exists():
         return
@@ -1390,10 +1312,8 @@ def _install_cryptbase_in_prefix(pfx=None):
         if dst.exists() and hashlib.sha1(dst.read_bytes()).digest() == \
                 hashlib.sha1(src.read_bytes()).digest():
             return                                  # already our stub
-        # Install our self-contained stub (036=RtlGenRandom xorshift, 040/041
-        # no-op). It's proven to let the OpenSSL XCurl load + run; an existing
-        # prefix cryptbase may be a non-functional placeholder, so we replace it
-        # but keep a one-time backup for restore.
+        # An existing prefix cryptbase may be a non-functional placeholder —
+        # replace it, keeping a one-time backup.
         bak = sys32 / "cryptbase.dll.bol-orig"
         if dst.exists() and not bak.exists():
             shutil.copy2(dst, bak)
@@ -1404,15 +1324,9 @@ def _install_cryptbase_in_prefix(pfx=None):
 
 
 def install_gameinput(prefix: Path, game_dir: Path):
-    """Install Microsoft GameInput into the prefix so the game starts.
-
-    Without gameinput.dll Minecraft GDK aborts at launch with a 'GameInput
-    Runtime could not be loaded' dialog. The redistributable ships inside the
-    game package itself (Installers/GameInputRedist.msi) and installs the very
-    same gameinput.dll a working GDK prefix has, so this is fully reproducible
-    on any machine — no bundling, no extra download. Idempotent: skips when
-    gameinput.dll is already there (a fresh install or an existing GDK prefix
-    we reuse)."""
+    """Install Microsoft GameInput into the prefix (the game aborts at launch
+    without gameinput.dll). The redistributable ships inside the game package
+    (Installers/GameInputRedist.msi), so no extra download. Idempotent."""
     sys32 = prefix / "drive_c/windows/system32"
     if (sys32 / "gameinput.dll").exists():
         return
@@ -1424,13 +1338,9 @@ def install_gameinput(prefix: Path, game_dir: Path):
     info("Installing Microsoft GameInput …")
     LOGS.mkdir(parents=True, exist_ok=True)
     log = open(LOGS / "native-login.log", "a")
-    # msiexec boots the prefix and writes gameinput.dll (x64 -> system32,
-    # x86 -> syswow64) early, but a post-install custom action then calls
-    # advapi32.SystemFunction036 (RtlGenRandom) from a wineserver-spawned
-    # process this Wine leaves unimplemented — it loops in the debugger and
-    # never exits. The DLLs are all we need, so we poll until both are in
-    # place, then tear the install down scoped to this prefix (so a real
-    # game running in another prefix is never touched).
+    # msiexec writes both DLLs early but a post-install action hangs forever
+    # (RtlGenRandom unimplemented in this Wine) — poll until the DLLs exist,
+    # then kill the install, scoped to this prefix only.
     gi64 = sys32 / "gameinput.dll"
     gi32 = prefix / "drive_c/windows/syswow64/gameinput.dll"
     cmd, env = proton_umu_cmd("msiexec", prefix=prefix)
@@ -1462,17 +1372,10 @@ def install_gameinput(prefix: Path, game_dir: Path):
 
 
 def _patch_lhc_xcurl_gate(game_dir: Path):
-    """Force libHttpClient.GDK onto the XCurl/Curl HTTP provider.
-
-    PlatformInitialize picks its provider by console-detection: it reads
-    HKLM\\Software\\Microsoft\\Windows NT\\CurrentVersion\\OEM\\ConsoleMode,
-    maps known Xbox hardware codes to a device-type enum, then runs
-    `add eax,-2 ; cmp eax,6 ; ja <winhttp>` — so only console enums (2..8)
-    take the XCurl path; everything else (incl. Wine, where ConsoleMode is not
-    a real hardware code → enum 0) falls to WinHTTP → Wine secur32 → the Azure
-    Front Door wall. NOP that 6-byte `ja` so the XCurl branch is always taken.
-    Combined with the OpenSSL XCurl.dll above this routes PlayFab over OpenSSL.
-    Idempotent; apply_patch backs up the original first."""
+    """Force libHttpClient.GDK onto the XCurl HTTP provider. Its console
+    check (`add eax,-2 ; cmp eax,6 ; ja <winhttp>`) only takes the XCurl path
+    for console enums 2..8 — under Wine it falls to WinHTTP → secur32 → the
+    Azure wall. NOP the 6-byte `ja` so XCurl is always used. Idempotent."""
     dll = game_dir / "libHttpClient.GDK.dll"
     if not dll.exists():
         return
@@ -1694,14 +1597,9 @@ def _install_prebuilt_winegdk(progress=None):
 
 
 def ensure_winegdk(force=False, progress=None):
-    """Build a GDK-Proton from the user's WineGDK fork (XUser + request
-    signing) and wire it in for native in-game login. The Wine build is
-    long; results are cached by source commit."""
-    # Preferred path: a prebuilt engine — end users download it once instead
-    # of compiling a full Wine. The from-source build below is the fallback,
-    # reached only when no prebuilt asset is published for this engine rev
-    # (developers iterating on the fork). Strictly additive: with no asset
-    # hosted, this behaves exactly like the build-only flow it replaced.
+    """Provide the WineGDK engine (XUser + request signing) and wire it in:
+    download the prebuilt asset when published, else build the fork from
+    source (long; cached by source commit)."""
     s = load_settings()
     if not force and (WINEGDK_OUT / "proton").exists() \
             and s.get("winegdk_built", "").endswith(":" + WINEGDK_BUILD_REV):
@@ -1734,10 +1632,8 @@ def ensure_winegdk(force=False, progress=None):
                 + "\n  then re-run.")
         base = _stock_proton_root(progress)
         # Build Wine straight into a fresh copy of the stock GDK-Proton's
-        # files/ — so wine, wine64, wineserver and libwine all come from the
-        # SAME build (a partial overlay gave "wineserver version mismatch
-        # 864/931" → instant crash). Proton's non-Wine bits (the proton
-        # script, dxvk, vkd3d) stay; only Wine is replaced, coherently.
+        # files/ so wine + wineserver + libwine come from the SAME build
+        # (a partial overlay gives "wineserver version mismatch" crashes).
         info("Preparing GDK-Proton base …")
         shutil.rmtree(WINEGDK_OUT, ignore_errors=True)
         run(["cp", "-a", str(base), str(WINEGDK_OUT)])
@@ -1747,21 +1643,13 @@ def ensure_winegdk(force=False, progress=None):
         logf = LOGS / "winegdk-build.log"
         LOGS.mkdir(parents=True, exist_ok=True)
         info(f"Building WineGDK — long (full Wine build); log: {logf}")
-        # Incremental-friendly: only wipe the build dir when the source tree
-        # really changed (or --force). After an aborted build (compile
-        # error, ^C, crash) the next click resumes via `make` instead of
-        # restarting from scratch — saves a huge amount of time on the
-        # ~2600 .o files that already compiled.
-        # Stamp the build dir with commit AND configure flags rev. A flag
-        # change (e.g. --enable-win64 -> --enable-archs) means the cached
-        # objects are for a different Wine layout and must be discarded
-        # instead of incremental-rebuilt.
+        # Incremental: the build dir is stamped with commit + build rev +
+        # prefix, and only wiped when that changes (or --force) — an aborted
+        # build resumes via `make`. A build-rev change means a different
+        # Wine layout, so cached objects must be discarded.
         stamp_want = f"{commit}|{WINEGDK_BUILD_REV}|{prefix}"
         stamp_have = cfg_stamp.read_text().strip() if cfg_stamp.exists() else ""
-        # Treat the legacy stamp formats as matching only when the layout
-        # rev hasn't changed: bare-prefix stamps and commit|prefix stamps
-        # come from --enable-win64 builds, so on a build-rev bump we
-        # invalidate them.
+        # Legacy stamp formats only match while the layout rev is unchanged.
         if stamp_have in (str(prefix), f"{commit}|{prefix}") \
                 and WINEGDK_BUILD_REV == "ovl2-prefix":
             stamp_have = stamp_want
@@ -1780,11 +1668,9 @@ def ensure_winegdk(force=False, progress=None):
                     die(f"WineGDK build failed: {' '.join(cmd[:2])} … — "
                         f"see {logf}")
             if clean:
-                # --enable-archs builds the i386 PE half too, so the new
-                # Wine WoW64 can actually run 32-bit binaries (msiexec,
-                # most installers, the WinAppRuntime MSIX deployer …).
-                # --enable-win64 alone gives 64-bit-only and any 32-bit
-                # exec dies in loader_init c0000005.
+                # --enable-archs builds the i386 PE half too — WoW64 needs it
+                # to run 32-bit binaries (msiexec, installers); --enable-win64
+                # alone makes any 32-bit exec die in loader_init.
                 sh([str(WINEGDK_SRC / "configure"),
                     "--enable-archs=i386,x86_64",
                     "--disable-tests", f"--prefix={prefix}"], bdir)
@@ -1793,14 +1679,10 @@ def ensure_winegdk(force=False, progress=None):
             sh(["make", f"-j{os.cpu_count() or 2}"], bdir)
             info("  compiled — installing Wine into the Proton tree …")
             sh(["make", "install"], bdir)
-        # Wine 11.x with `--enable-win64` produces a single `wine` binary
-        # (no wine64, no wine64-preloader). The Proton script still calls
-        # `wine64` / `wine64-preloader` by name — when those names hold
-        # the stale binaries from the GE-Proton base copy, they expect
-        # the old flat ntdll.so layout and abort with
-        # `wine: could not load ntdll.so: …/lib/wine/ntdll.so`. Symlink
-        # the legacy names to the unified loader so Proton's invocation
-        # routes through our build.
+        # Wine 11 produces a single `wine` binary, but the Proton script
+        # still calls `wine64`/`wine64-preloader` by name — left stale from
+        # the base copy, those abort with "could not load ntdll.so". Symlink
+        # the legacy names to the unified loader.
         bin_dir = prefix / "bin"
         if (bin_dir / "wine").is_file():
             for legacy in ("wine64", "wine64-preloader", "wine-preloader"):
@@ -1811,13 +1693,9 @@ def ensure_winegdk(force=False, progress=None):
                     p.symlink_to("wine")
                 except OSError as e:
                     warn(f"wine binary symlink {legacy} failed: {e}")
-        # Wine 11 ntdll.so depends on libunwind.so.8, which the Steam Linux
-        # Runtime sniper container does NOT carry (host's libunwind isn't
-        # auto-mirrored either). Without it, ntdll.so fails to dlopen and
-        # `wine: could not load ntdll.so: …/lib/wine/ntdll.so` is the only
-        # symptom. Drop the host copy into files/lib/x86_64-linux-gnu so
-        # LD_LIBRARY_PATH (which Proton populates with that dir) resolves
-        # it inside the container.
+        # Wine 11 ntdll.so needs libunwind.so.8, which the Steam Linux
+        # Runtime container doesn't carry — stage the host copy into
+        # files/lib/x86_64-linux-gnu (on Proton's LD_LIBRARY_PATH).
         for cand in ("/lib/x86_64-linux-gnu/libunwind.so.8.1.0",
                      "/usr/lib/x86_64-linux-gnu/libunwind.so.8.1.0",
                      "/lib/x86_64-linux-gnu/libunwind.so.8",
@@ -1864,9 +1742,9 @@ def do_setup(game_dir=None, mc_ver=None, proton_tag=None, pp_tag=None,
         use_game_dir(download_game(_auto_mc_version(s), progress, force=force))
     gd = Path(load_settings()["game_dir"])
     if load_settings().get("proton_source") == "winegdk":
-        ensure_winegdk(force, progress)        # ChristopherHX xbox-live-dev
-        install_gdk_xbox_dlls(gd)              # OSS Xbox-Live DLLs (before
-    else:                                     # fix_curl_ssl: keeps XCurl)
+        ensure_winegdk(force, progress)
+        install_gdk_xbox_dlls(gd)       # before fix_curl_ssl, which keeps XCurl
+    else:
         ensure_proton(proton_tag, force, progress)  # user-supplied dir/url
     ensure_umu(force)
     fix_curl_ssl(gd)
@@ -1888,11 +1766,8 @@ _DIAG_RULES = [
     (r"Cannot allocate memory|OutOfMemory|std::bad_alloc",
      "Out of memory (RAM/VRAM)."),
     (r"wineserver.*version mismatch|wineserver binary was not upgraded",
-     "Broken WineGDK packaging (wine vs wineserver mismatch) — rebuild: "
-     "'bedrock-on-linux setup --winegdk --force'."),
-    (r"wineserver.*version mismatch|wineserver binary was not upgraded",
-     "Broken WineGDK packaging (wine vs wineserver mismatch) — rebuild: "
-     "'bedrock-on-linux setup --winegdk --force'."),
+     "Broken WineGDK packaging (wine vs wineserver mismatch) — rebuild the "
+     "engine: 'bedrock-on-linux setup --force'."),
     (r"Authentication failed|invalid_grant|login.*failed",
      "Microsoft sign-in failed in-game — sign in again "
      "(open the link, enter the code)."),
@@ -1910,8 +1785,8 @@ _DIAG_RULES = [
      "Wine prefix broken (Wine couldn't open a window)."),
     (r"0x80004001|E_NOTIMPL|XUserAddAsync|xgameruntime.*(?:unimpl|stub)|"
      r"QueryApiImpl.*unimpl",
-     "The GDK-Proton in use has no WineGDK XUser — rebuild from your "
-     "fork: 'bedrock-on-linux setup --winegdk --force'."),
+     "The GDK-Proton in use has no WineGDK XUser — reinstall the engine: "
+     "'bedrock-on-linux setup --force'."),
 ]
 
 
@@ -1939,7 +1814,7 @@ def diagnose():
     return hits
 
 
-def launch(_pp=None, _repaired=False):
+def launch(_pp=None, _repaired=False, _force_x11=False, _no_gamescope=False):
     s = load_settings()
     gd = s.get("game_dir")
     if not gd or not Path(gd, "Minecraft.Windows.exe").exists():
@@ -1975,75 +1850,41 @@ def launch(_pp=None, _repaired=False):
     cmd, env = proton_umu_cmd(exe)
     env["PROTON_LOG"] = "1"
     env["PROTON_LOG_DIR"] = str(LOGS)
-    # Trace gdkc + winhttp so PlayFab / SISU responses + HTTP status codes
-    # surface in proton.log. The PlayFab LoginWithXbox flow happens over
-    # WinHTTP inside Minecraft itself — without +winhttp we only see GDK
-    # entry/exit, no HTTP status, no body — which is exactly why sign-in
-    # loops have been opaque to debug. fixme+all keeps the rest tractable.
+    # +gdkc,+winhttp puts PlayFab/SISU HTTP statuses in proton.log (the
+    # LoginWithXbox flow runs over WinHTTP inside Minecraft — without this,
+    # sign-in loops are opaque to debug).
     env["WINEDEBUG"] = os.environ.get("WINEDEBUG") or "+gdkc,+winhttp,fixme+all"
-    # GameInput: the previous "GameInputRedist=b" override (forcing built-in
-    # only) was meant to dodge the NtQueryWnfStateData abort, but Wine has no
-    # builtin and the load fails -> Minecraft pops the localised
-    # "gameinput_load.error.message" dialog (a "missing required component /
-    # Install" prompt) which dead-ends in msiexec. patch_proton already
-    # neutralises the ntdll unimplemented-stub funnel (NtQueryWnfStateData now
-    # returns STATUS_NOT_IMPL cleanly), and setup (install_gameinput) has put
-    # the native gameinput.dll in system32/syswow64 from the game's own
-    # Installers\\GameInputRedist.msi — let Wine load that one.  Keep an extra
-    # WINEDLLOVERRIDES from the host env if the user explicitly set it.
-    # cryptbase=n,b (native THEN builtin): prefer our self-contained
-    # cryptbase.dll stub (installed in system32 by _install_cryptbase_in_prefix)
-    # so OpenSSL XCurl's advapi32.SystemFunction036 (RtlGenRandom) resolves —
-    # but FALL BACK to the GDK-Proton builtin cryptbase when the stub is absent.
-    # The stub lives in DATA/xodus-xcurl/openssl-set, which only exists on the
-    # maintainer's box and is never shipped, so end users had no native
-    # cryptbase; "cryptbase=n" (native-only) then left the forwarded
-    # advapi32.SystemFunction036 unresolvable → every Wine service AND
-    # explorer.exe abort on RtlGenRandom → "nodrv_CreateWindow: explorer process
-    # failed to start" → the launcher misread that symptom as a broken prefix,
-    # reset+relaunched in a loop, and finally blamed a non-existent GPU/display
-    # fault. The builtin cryptbase exports SystemFunction036 (RtlGenRandom), so
-    # the fallback boots the prefix even with no stub; PlayFab login still gets
-    # working randomness from it.
+    # cryptbase=n,b: prefer our cryptbase.dll RNG stub (installed in system32
+    # by _install_cryptbase_in_prefix) so OpenSSL XCurl's RtlGenRandom forward
+    # resolves, but FALL BACK to the GDK-Proton builtin when the stub is
+    # absent — native-only would leave SystemFunction036 unresolvable and
+    # every Wine service + explorer.exe aborts (looks like a broken prefix).
+    # Host WINEDLLOVERRIDES are kept if the user set any.
     overrides = ["cryptbase=n,b"]
     cur = os.environ.get("WINEDLLOVERRIDES", "")
     if cur:
         overrides.append(cur)
     env["WINEDLLOVERRIDES"] = ";".join(overrides)
-    # Suppress the WindowsAppRuntime "Required components of the Windows
-    # App Runtime are missing — Install?" dialog.  The text lives in BOTH
-    # Microsoft.WindowsAppRuntime.Bootstrap.dll (MddBootstrapInitialize)
-    # and Microsoft.WindowsAppRuntime.dll (DeploymentManager.Initialize)
-    # — each path has its own env-var gate (also visible in `strings`):
-    #   BOOTSTRAP_INITIALIZE_SHOWUI / _FAILFAST and
-    #   DEPLOYMENT_INITIALIZE_ONERRORSHOWUI.
-    # On Wine the framework MSIX is never installable (no MSIX deploy),
-    # so both paths will always fail.  Mute the UI AND the failfast on
-    # Bootstrap so the process keeps running instead of aborting.
+    # WindowsAppRuntime's framework MSIX can never install under Wine, so its
+    # two init paths (Bootstrap + DeploymentManager) always fail — mute their
+    # "Install?" dialogs AND the Bootstrap failfast via the env gates each
+    # DLL checks, so the game keeps running.
     env["MICROSOFT_WINDOWSAPPRUNTIME_BOOTSTRAP_INITIALIZE_SHOWUI"] = "0"
     env["MICROSOFT_WINDOWSAPPRUNTIME_BOOTSTRAP_INITIALIZE_FAILFAST"] = "0"
     env["MICROSOFT_WINDOWSAPPRUNTIME_DEPLOYMENT_INITIALIZE_ONERRORSHOWUI"] = "0"
-    # MC's libHttpClient.GDK.dll calls WinHttpSetOption(SECURE_PROTOCOLS),
-    # overriding our HKLM DefaultSecureProtocols. Wine 11.1's GnuTLS then
-    # negotiates a TLS 1.3 handshake with Azure PlayFab that the server
-    # rejects with a 7-byte fatal Alert → SEC_E_INTERNAL_ERROR 0x80090304
-    # → MC's POST /Client/LoginWithXbox never ships its JSON body and the
-    # sign-in loops. Forcing GnuTLS itself to drop TLS 1.3 via a system
-    # priority file sidesteps the libhttpclient option — GnuTLS will only
-    # offer TLS 1.0-1.2 in the ClientHello regardless of what schannel
-    # asks for. %COMPAT loosens cipher matching for the older Azure stack.
+    # libHttpClient overrides our HKLM DefaultSecureProtocols via
+    # WinHttpSetOption, so drop TLS 1.3 at the GnuTLS level instead (Azure
+    # rejects Wine's TLS 1.3 ClientHello → sign-in loops). %COMPAT loosens
+    # cipher matching for the older Azure stack.
     prio = DATA / "etc" / "gnutls-no-tls13.cfg"
     if not prio.exists():
         prio.parent.mkdir(parents=True, exist_ok=True)
         prio.write_text("[priorities]\nSYSTEM = NORMAL:-VERS-TLS1.3:%COMPAT\n")
     env["GNUTLS_SYSTEM_PRIORITY_FILE"] = str(prio)
     env["GNUTLS_SYSTEM_PRIORITY_FAIL_ON_INVALID"] = "0"
-    # Tell DeviceAuth_Initialize where to find the host-side pre-auth blob
-    # (set by xbl_preauth above). When present, the C side imports the EC
-    # private key, sets the device_token, and skips the broken Wine /device/
-    # authenticate POST entirely. Path is the Linux path translated through
-    # Wine's Z: drive — Wine recognises Z:\\ as `/` and CreateFileA / fopen
-    # can read it like any local file.
+    # Hand DeviceAuth_Initialize the host-side pre-auth blob (written by
+    # xbl_preauth above) via Wine's Z: drive, so the C side skips the broken
+    # Wine-side /device/authenticate POST.
     preauth = DATA / "winegdk-preauth" / "device.json"
     if preauth.exists():
         env["WINEGDK_PREAUTH_DEVICE"] = "Z:" + str(preauth).replace("/", "\\")
@@ -2056,26 +1897,36 @@ def launch(_pp=None, _repaired=False):
         san = "".join(c.upper() if c.isalnum() else "_" for c in host)
         env["WINEGDK_XSTS_RP_" + san] = rp
         info(f"XSTS relying party override [{host}] = {rp}")
-    # Display + INPUT backend. Under XWayland (winex11.drv on a Wayland session —
-    # Niri, KDE/GNOME Wayland, the Legion Go) Minecraft's GameInput gets no mouse
-    # or controller: it reads them via raw input, which XWayland doesn't deliver
-    # to the game window. Only the keyboard (Win32 path) works. On a real X
-    # server raw input works — which is why it runs on the maintainer's
-    # Cinnamon/X11 box but not for Wayland users.
-    #
-    # winewayland.drv would fix the input (native Wayland pointer), BUT enabling
-    # it makes Proton DISABLE winex11.drv, and on some compositors winewayland
-    # then fails to connect to the display inside the pressure-vessel container
-    # → nodrv_CreateWindow → the game won't start AT ALL (confirmed on
-    # Niri/CachyOS). A non-starting game is worse than a startable one with a
-    # dead mouse, so the safe default stays XWayland. winewayland is opt-in:
-    #   BOL_INPUT=wayland  (or the input_backend setting)
-    # for the compositors where it does connect; BOL_INPUT=x11 forces XWayland.
+    # Display + input backend. Under XWayland, GameInput gets no mouse or
+    # controller (it reads raw input, which XWayland doesn't deliver) — only
+    # the keyboard works. winewayland would fix that, but it disables
+    # winex11 and on some compositors fails to connect inside the
+    # pressure-vessel container → the game won't start at all. So the safe
+    # default is XWayland; winewayland is opt-in via BOL_INPUT=wayland (or
+    # the input_backend setting), and if that attempt can't open a window
+    # the post-launch handler relaunches on XWayland automatically.
     wl = os.environ.get("WAYLAND_DISPLAY")
     backend = (os.environ.get("BOL_INPUT")
                or load_settings().get("input_backend") or "auto").lower()
     if backend == "auto":
         backend = "x11"               # never auto-pick wayland (see above)
+    if _force_x11:
+        backend = "x11"
+    # On Wayland the in-game mouse is dead under XWayland; gamescope's nested
+    # Xwayland delivers it. Auto-use it there when installed (BOL_GAMESCOPE=0
+    # opts out; any other value is a literal gamescope option string). The
+    # post-launch handler retries without it if it can't present the game.
+    gs_opt = os.environ.get("BOL_GAMESCOPE")
+    if gs_opt is not None:
+        want_gamescope = gs_opt.lower() not in ("0", "no", "off", "false", "")
+    else:
+        want_gamescope = bool(wl) and backend != "wayland"
+    use_gamescope = (want_gamescope and not _no_gamescope
+                     and bool(shutil.which("gamescope")))
+    if use_gamescope:
+        backend = "x11"
+    elif want_gamescope and gs_opt is None and not shutil.which("gamescope"):
+        info("Tip: install gamescope to fix the in-game mouse on Wayland.")
     disp = os.environ.get("DISPLAY")
     if backend == "wayland" and wl:
         env["PROTON_ENABLE_WAYLAND"] = "1"
@@ -2083,20 +1934,18 @@ def launch(_pp=None, _repaired=False):
         xrd = os.environ.get("XDG_RUNTIME_DIR")
         if xrd:
             env["XDG_RUNTIME_DIR"] = xrd
-        # winewayland only engages when DISPLAY is UNSET — otherwise the v1.0.6
-        # attempt died with nodrv_CreateWindow (winex11 disabled by Proton, yet
-        # the X path still half-initialised). Drop it so Wine has only Wayland.
+        # winewayland only engages when DISPLAY is unset.
         env.pop("DISPLAY", None)
-        # GE-Proton otherwise probes the primary monitor via xrandr, which fails
-        # with no X server (Niri) → no window. Let the user name the output
-        # (e.g. BOL_WAYLAND_MONITOR=DP-1) to skip that probe.
+        # GE-Proton probes the primary monitor via xrandr, which fails with
+        # no X server → no window; naming the output skips that probe.
         mon = (os.environ.get("BOL_WAYLAND_MONITOR")
                or os.environ.get("WAYLANDDRV_PRIMARY_MONITOR"))
         if mon:
             env["WAYLANDDRV_PRIMARY_MONITOR"] = mon
-        warn("BOL_INPUT=wayland → winewayland (opt-in mouse fix). If the game "
-             "doesn't start (black/no window) try BOL_WAYLAND_MONITOR=<output> "
-             "(e.g. eDP-1); otherwise unset BOL_INPUT to use XWayland.")
+        warn("BOL_INPUT=wayland → winewayland (opt-in mouse fix). If it can't "
+             "open a window the launcher falls back to XWayland automatically; "
+             "to help winewayland connect first try BOL_WAYLAND_MONITOR=<output> "
+             "(e.g. eDP-1).")
     else:
         if backend == "wayland":
             warn("BOL_INPUT=wayland but no WAYLAND_DISPLAY found — using X11.")
@@ -2119,6 +1968,16 @@ def launch(_pp=None, _repaired=False):
         elif wl:
             warn("Wayland session without X DISPLAY — install XWayland (or set "
                  "BOL_INPUT=wayland to use winewayland).")
+    if use_gamescope:
+        if gs_opt and gs_opt.strip().lower() not in ("1", "yes", "on", "true"):
+            gs_argv = ["gamescope"] + shlex.split(gs_opt)      # explicit options
+        else:
+            gs_argv = ["gamescope", "-f"]
+            wh = _screen_wh()                                  # native res, else -f only
+            if wh:
+                gs_argv += ["-W", wh[0], "-H", wh[1], "-w", wh[0], "-h", wh[1]]
+        cmd = gs_argv + ["--"] + cmd
+        info("Using gamescope (Wayland in-game mouse fix).")
     info("Launching Minecraft … sign in with Microsoft in-game, then "
          "join your server from the Servers tab.")
     glog = open(LOGS / "minecraft.log", "w")
@@ -2140,31 +1999,42 @@ def launch(_pp=None, _repaired=False):
                 old.unlink(missing_ok=True)
         ok(f"Game closed (exit {rc}).")
         hits = diagnose()
-    # Self-repair: a genuinely broken Wine prefix is fixable without bothering
-    # the user — reset it, re-bootstrap and relaunch ONCE. Guarded against
-    # loops (_repaired); skipped when the display is unavailable (a reset can't
-    # fix that). It only runs after a failed launch and retries at most once,
-    # so the worst case is simply today's behaviour. The login survives — the
-    # token lives in DATA/msa, not the prefix.
+    # Self-repair: a genuinely broken Wine prefix is reset + relaunched ONCE
+    # (_repaired guards the loop). Skipped when the display is unavailable —
+    # a reset can't fix that. The login survives: the token lives in
+    # DATA/msa, not the prefix.
     broken = any("prefix broken" in h.lower() for h in hits)
     no_display = any("display unavailable" in h.lower() for h in hits)
     rng_abort = any("rng unresolved" in h.lower() for h in hits)
     wayland_attempt = env.get("PROTON_ENABLE_WAYLAND") == "1"
-    # A SystemFunction036 abort makes explorer fail to start, which *looks* like
-    # a broken prefix (nodrv_CreateWindow) but isn't — a reset won't help and the
-    # cause is neither the prefix nor the GPU. The cryptbase=n,b fallback resolves
-    # it, so just relaunch instead of looping the reset / blaming the display.
+    # gamescope couldn't present the game (never reached umu, or its nested
+    # display gave nodrv) → retry once without it so a launch is never lost.
+    if use_gamescope and not _no_gamescope:
+        ml = LOGS / "minecraft.log"
+        ran = ml.exists() and "umu-launcher" in ml.read_text(errors="ignore")[:8000]
+        if broken or not ran:
+            warn("gamescope couldn't present the game — retrying without it.")
+            return launch(_pp, _repaired=_repaired, _no_gamescope=True)
+    # An RNG abort makes explorer fail to start, which only *looks* like a
+    # broken prefix — a reset won't help; the cryptbase=n,b fallback fixes it
+    # on relaunch.
     if rng_abort:
         warn("The window failure came from the cryptbase RNG abort, not a broken "
              "prefix or GPU — relaunch (builtin cryptbase now provides "
              "RtlGenRandom).")
     elif wayland_attempt and broken:
-        # winewayland (BOL_INPUT=wayland) couldn't open a window — that's the
-        # Wayland backend not connecting, NOT a broken prefix. Never reset the
-        # prefix for this; point the user back to the working XWayland path.
-        warn("winewayland couldn't open a window (BOL_INPUT=wayland). This is "
-             "the Wayland backend, not a broken prefix — unset BOL_INPUT (or set "
-             "BOL_INPUT=x11) to use XWayland, or try BOL_WAYLAND_MONITOR=<output>.")
+        # winewayland couldn't open a window — the Wayland backend didn't
+        # connect, NOT a broken prefix: never reset for this. Relaunch ONCE
+        # on XWayland when available (_force_x11 guards the loop).
+        if not _force_x11 and os.environ.get("DISPLAY"):
+            warn("winewayland couldn't open a window — falling back to XWayland "
+                 "so the game still starts (mouse may be limited; that is the "
+                 "winewayland trade-off). Set BOL_INPUT=x11 to skip the attempt "
+                 "next time, or BOL_WAYLAND_MONITOR=<output> to help winewayland.")
+            return launch(_pp, _repaired=_repaired, _force_x11=True)
+        warn("winewayland couldn't open a window (BOL_INPUT=wayland) and no X "
+             "DISPLAY is available to fall back to — unset BOL_INPUT (or set "
+             "BOL_INPUT=x11) and make sure XWayland is running.")
     elif broken and not no_display:
         if not _repaired:
             warn("Broken Wine prefix — repairing and relaunching once…")
@@ -2174,7 +2044,7 @@ def launch(_pp=None, _repaired=False):
                                   Path(load_settings()["game_dir"]))
             except Exception as e:
                 warn(f"Re-bootstrap after repair failed ({e}).")
-            return launch(_pp, _repaired=True)
+            return launch(_pp, _repaired=True, _force_x11=_force_x11)
         warn("Still failing after an automatic repair — likely a GPU/display "
              "issue, not the prefix.")
     return rc

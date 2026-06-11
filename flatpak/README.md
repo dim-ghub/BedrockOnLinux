@@ -1,0 +1,86 @@
+# Flatpak / Flathub
+
+App ID: **`io.github.wyze3306.BedrockOnLinux`**
+
+| File | Role |
+|---|---|
+| `io.github.wyze3306.BedrockOnLinux.yml` | Flathub-ready manifest (pinned sources, real sha256) |
+| `io.github.wyze3306.BedrockOnLinux.desktop` / `.metainfo.xml` | installed from the app source by the manifest |
+| `flathub.json` | restricts Flathub builds to x86_64 (the game is 64-bit only) |
+| `../scripts/build-flatpak.sh` | local build (working tree); `--release` builds the pure manifest |
+
+## Local build & test
+
+```bash
+scripts/build-flatpak.sh        # → dist/BedrockOnLinux-<ver>-x86_64.flatpak
+flatpak install --user dist/BedrockOnLinux-*-x86_64.flatpak
+flatpak run io.github.wyze3306.BedrockOnLinux
+```
+
+Test order: (1) build passes — the `python3` module aborts if tkinter didn't
+link; (2) the Tk window opens; (3) engine/game download lands in
+`~/.local/share/bedrock-on-linux`; (4) the game launches — the
+pressure-vessel-inside-Flatpak step is the one most likely to need iteration.
+To debug: `flatpak run --devel --command=sh io.github.wyze3306.BedrockOnLinux`
+then `bedrock-on-linux play`.
+
+Not supported inside the Flatpak: the from-source engine build (no
+git/gcc/mingw in the runtime). The prebuilt engine download is the only path —
+fine for users, but keep the release asset published.
+
+## Publishing on Flathub
+
+Per <https://docs.flathub.org/docs/for-app-authors/submission>:
+
+1. **Tag the release** this manifest pins, then fill in the commit:
+
+   ```bash
+   git tag -a v1.0.9 -m 'BedrockOnLinux v1.0.9' && git push origin v1.0.9
+   git rev-parse 'v1.0.9^{commit}'   # → add as `commit:` under the git source
+   ```
+
+2. **Verify locally** what Flathub CI will run:
+
+   ```bash
+   flatpak install flathub org.flatpak.Builder
+   flatpak run --command=flatpak-builder-lint org.flatpak.Builder manifest \
+     flatpak/io.github.wyze3306.BedrockOnLinux.yml
+   flatpak run --command=flatpak-builder-lint org.flatpak.Builder appstream \
+     flatpak/io.github.wyze3306.BedrockOnLinux.metainfo.xml
+   scripts/build-flatpak.sh --release
+   ```
+
+3. **Open the submission PR**:
+
+   ```bash
+   # fork github.com/flathub/flathub first (keep "copy the master branch only" UNCHECKED)
+   git clone --branch=new-pr git@github.com:<you>/flathub.git flathub-pr
+   cd flathub-pr && git checkout -b add-bedrockonlinux new-pr
+   cp ../BedrockOnLinux/flatpak/io.github.wyze3306.BedrockOnLinux.yml .
+   cp ../BedrockOnLinux/flatpak/flathub.json .
+   git add . && git commit -m 'Add io.github.wyze3306.BedrockOnLinux'
+   git push -u origin add-bedrockonlinux
+   # open the PR against flathub/flathub branch `new-pr`,
+   # then comment:  bot, build io.github.wyze3306.BedrockOnLinux
+   ```
+
+4. After merge, Flathub creates `flathub/io.github.wyze3306.BedrockOnLinux`
+   and invites you as collaborator. **Verify the app** (Settings on
+   <https://flathub.org> → your app → Verification → via the GitHub account
+   `wyze3306`, which matches the `io.github.wyze3306.*` ID).
+
+### Permission rationale (paste into the PR description)
+
+- `--device=all`: Vulkan GPU access + game controllers (hidraw).
+- `--talk-name=org.freedesktop.Flatpak`, `--allow=devel`, `--allow=multiarch`:
+  the game runs through umu-launcher → pressure-vessel (Steam Linux Runtime),
+  which spawns its sub-sandbox via the Flatpak portal and runs 32-bit Wine
+  code; same permission set as Lutris, Bottles and Heroic.
+- `--filesystem=xdg-data/bedrock-on-linux:create`: the launcher's data dir
+  (engine, game files, Wine prefix), shared with non-Flatpak installs.
+- `--filesystem=xdg-data/umu:create`, `--filesystem=~/.steam:create`: dirs
+  umu-launcher/Proton expect for the Steam-compat layout.
+- `--share=network`: downloads + Microsoft/Xbox sign-in + multiplayer.
+
+The app ships no Minecraft content; users supply their own game files
+(launcher precedent on Flathub: `io.mrarm.mcpelauncher`).
