@@ -70,7 +70,7 @@ GDK_DEPS_DLLS = ("libHttpClient.GDK.dll", "XCurl.dll")
 # Too big to bundle (20 MB) — downloaded once from the app's releases as
 # openssl-xcurl-set-<rev>.tar.gz. Republish: scripts/package-openssl-xcurl.sh.
 OPENSSL_XCURL_SET = DATA / "xodus-xcurl" / "openssl-set"
-OPENSSL_XCURL_REV = "56a296acc12a"
+OPENSSL_XCURL_REV = "17bc4b81e178"
 WINEGDK_SRC = DATA / "winegdk-src"
 WINEGDK_OUT = PROTON_DIR / "GDK-Proton-xuser"
 # Prebuilt engine: users download GDK-Proton-xuser-<build-rev>.tar.gz from the
@@ -1792,6 +1792,150 @@ def patch_options():
     ok("Multiplayer warning disabled")
 
 
+# ---- content import (.mcpack / .mcaddon / .mcworld / .mctemplate) ----------
+# Minecraft Bedrock normally imports these by "opening" the file, which has no
+# handler under Wine — so worlds/packs can't be imported in-game. We unpack
+# them straight into the game's com.mojang folders instead.
+COM_MOJANG_REL = ("drive_c/users/steamuser/AppData/Roaming/Minecraft Bedrock/"
+                  "Users/Shared/games/com.mojang")
+IMPORT_EXTS = (".mcpack", ".mcaddon", ".mcworld", ".mctemplate", ".mcskin",
+               ".zip")
+
+
+def _mc_running():
+    try:
+        return subprocess.run(["pgrep", "-f", "Minecraft.Windows.exe"],
+                              capture_output=True).returncode == 0
+    except Exception:
+        return False
+
+
+def _mojang_dir(prefix=None):
+    return (prefix or active_prefix()) / COM_MOJANG_REL
+
+
+def _safe_component(name):
+    """A filesystem-safe folder name derived from a pack/world name."""
+    name = re.sub(r"[^\w .()\-]+", "_", (name or "").strip()) or "imported"
+    return name[:96]
+
+
+def _unique_path(p: Path):
+    if not p.exists():
+        return p
+    for i in range(2, 1000):
+        cand = p.with_name(f"{p.name} ({i})")
+        if not cand.exists():
+            return cand
+    return p.with_name(f"{p.name} ({os.getpid()})")
+
+
+def _pack_subfolder(manifest):
+    """The com.mojang subfolder a pack belongs in, from its manifest modules."""
+    types = set()
+    try:
+        for m in manifest.get("modules", []):
+            t = (m.get("type") or "").lower()
+            if t:
+                types.add(t)
+    except Exception:
+        pass
+    if types & {"skin_pack", "skins"}:
+        return "skin_packs"
+    if types & {"data", "script", "client_data"}:
+        return "behavior_packs"
+    if types & {"world_template"}:
+        return "world_templates"
+    return "resource_packs"          # resources (and the safe default)
+
+
+def _install_pack_tree(pack_root: Path, base: Path, fallback_name: str):
+    """Move one extracted pack (dir containing manifest.json) into com.mojang."""
+    manifest = {}
+    mf = pack_root / "manifest.json"
+    if mf.exists():
+        try:
+            manifest = json.loads(mf.read_text(encoding="utf-8", errors="ignore"))
+        except Exception:
+            manifest = {}
+    sub = _pack_subfolder(manifest)
+    try:
+        nm = manifest.get("header", {}).get("name") or fallback_name
+    except Exception:
+        nm = fallback_name
+    dest = _unique_path(base / sub / _safe_component(str(nm)))
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(pack_root), str(dest))
+    return sub, dest.name
+
+
+def import_content(src, prefix=None):
+    """Import a .mcpack/.mcaddon/.mcworld/.mctemplate into the game. Returns a
+    list of human-readable result strings."""
+    src = Path(src).expanduser()
+    if not src.is_file():
+        die(f"File not found: {src}")
+    if not zipfile.is_zipfile(src):
+        die(f"Not a Minecraft content file (not a zip): {src.name}")
+    base = _mojang_dir(prefix)
+    base.mkdir(parents=True, exist_ok=True)
+    ext = src.suffix.lower()
+    stem = src.stem
+    results = []
+
+    if ext in (".mcworld", ".mctemplate"):
+        sub = "minecraftWorlds" if ext == ".mcworld" else "world_templates"
+        dest = _unique_path(base / sub / _safe_component(stem))
+        dest.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(src) as z:
+            z.extractall(dest)
+        kind = "world" if ext == ".mcworld" else "world template"
+        results.append(f"{kind}: {dest.name}")
+        ok(f"Imported {kind} → {dest.name}")
+        return results
+
+    # .mcpack (single pack) or .mcaddon (one or more packs): extract to a temp
+    # dir, then move every folder that has a manifest.json to its right home.
+    tmp = base / ".bol-import-tmp"
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True, exist_ok=True)
+    try:
+        with zipfile.ZipFile(src) as z:
+            z.extractall(tmp)
+        manifests = sorted(tmp.rglob("manifest.json"),
+                           key=lambda p: len(p.parts))
+        # Skip nested manifests (a pack inside an already-claimed pack dir).
+        claimed, roots = [], []
+        for mf in manifests:
+            r = mf.parent
+            if any(str(r).startswith(str(c) + os.sep) for c in claimed):
+                continue
+            claimed.append(r)
+            roots.append(r)
+        if not roots:
+            die(f"No manifest.json in {src.name} — not a valid pack/addon.")
+        for r in roots:
+            sub, nm = _install_pack_tree(r, base, stem)
+            label = sub.rstrip("s").replace("_", " ")
+            results.append(f"{label}: {nm}")
+            ok(f"Imported {label} → {nm}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    return results
+
+
+def cmd_import(paths):
+    if not paths:
+        die("Usage: bedrock-on-linux import <file.mcpack|.mcworld|.mcaddon> …")
+    if _mc_running():
+        warn("Minecraft appears to be running — close it before importing so "
+             "the game picks up new content on next launch.")
+    total = []
+    for p in paths:
+        total += import_content(p)
+    ok(f"Done — imported {len(total)} item(s) into {_mojang_dir()}")
+
+
 def _auto_mc_version(s):
     vs = list_mc_versions(False) or list_mc_versions(True)
     if not vs:
@@ -2834,7 +2978,42 @@ def gui():
                        activebackground=PANEL, activeforeground=FG, bd=0,
                        highlightthickness=0, anchor="w").pack(fill="x", pady=2)
         tk.Frame(d, bg=PANEL2, height=1).pack(fill="x", pady=12)
+
+        imp_status = tk.StringVar(value="")
+
+        def do_import():
+            from tkinter import filedialog, messagebox
+            files = filedialog.askopenfilenames(
+                parent=d, title="Import Minecraft content",
+                filetypes=[("Minecraft content",
+                            "*.mcpack *.mcaddon *.mcworld *.mctemplate *.mcskin"),
+                           ("All files", "*.*")])
+            if not files:
+                return
+            imp_status.set("Importing…")
+
+            def work():
+                done, errs = [], []
+                for f in files:
+                    try:
+                        done += import_content(f)
+                    except BolError as e:
+                        errs.append(str(e))
+                    except Exception as e:        # noqa: BLE001
+                        errs.append(f"{Path(f).name}: {e}")
+                msg = (f"Imported {len(done)} item(s)."
+                       if done else "Nothing imported.")
+                if errs:
+                    msg += "\n\nProblems:\n• " + "\n• ".join(errs)
+                if _mc_running():
+                    msg += ("\n\nMinecraft is running — restart it to see the "
+                            "new content.")
+                d.after(0, lambda: (imp_status.set(""),
+                                    messagebox.showinfo("Import", msg, parent=d)))
+            threading.Thread(target=work, daemon=True).start()
+
         for label, fn in (
+            ("Import content (.mcpack / .mcworld / .mcaddon)…", do_import),
             ("Open logs folder", lambda: subprocess.Popen(
                 ["xdg-open", str(LOGS)], stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL)),
@@ -2844,6 +3023,8 @@ def gui():
         ):
             button(d, label, fn, PANEL2, FG, "#363b46", ("", 11), 14, 9
                    ).pack(fill="x", pady=3)
+        tk.Label(d, textvariable=imp_status, bg=PANEL, fg=GOLD,
+                 font=("", 9)).pack(anchor="w")
         tk.Label(d, text=f"{PRETTY} {VERSION}", bg=PANEL, fg=SUB,
                  font=("", 9)).pack(anchor="w", pady=(14, 0))
 
@@ -2943,6 +3124,10 @@ def main():
     lv = sub.add_parser("versions", help="list available Minecraft versions")
     lv.add_argument("--beta", action="store_true")
     sub.add_parser("login", help="sign in to a Microsoft account")
+    ip = sub.add_parser("import",
+                        help="import .mcpack/.mcaddon/.mcworld/.mctemplate")
+    ip.add_argument("files", nargs="+", metavar="FILE",
+                    help="content file(s) to import")
     sub.add_parser("repair", help="reset the Wine prefix")
     sub.add_parser("doctor", help="check host requirements")
     sub.add_parser("update", help="check for and install launcher updates")
@@ -2989,6 +3174,8 @@ def main():
                     (ok if state == "ok" else warn)(msg)
                 else:
                     info("Update skipped.")
+        elif a.cmd == "import":
+            cmd_import(a.files)
         elif a.cmd == "repair":
             reset_prefix()
         elif a.cmd == "gui":
