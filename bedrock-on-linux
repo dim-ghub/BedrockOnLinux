@@ -1015,6 +1015,23 @@ def xbl_preauth(msa_access_token):
     except (KeyError, IndexError, TypeError):
         pass
 
+    # ---- 3d. sisu /authorize for the licensing RP, used by the in-game
+    # Marketplace — its catalog/entitlement edges (collections/purchase.
+    # mp.microsoft.com, inventory/licensing.xboxlive.com) only accept an XSTS
+    # token minted for http://licensing.xboxlive.com. Pre-mint it here so the
+    # store catalog loads instead of hanging on a live SISU call (which RSTs
+    # under Wine GnuTLS).
+    lic_sisu = _sisu("http://licensing.xboxlive.com") or {}
+    lic_auth = lic_sisu.get("AuthorizationToken", {}) if lic_sisu else {}
+    lic_rp = "http://licensing.xboxlive.com" if lic_auth.get("Token") else None
+    lic_token = lic_auth.get("Token")
+    lic_expiry = lic_auth.get("NotAfter", "")
+    lic_uhs = None
+    try:
+        lic_uhs = lic_auth["DisplayClaims"]["xui"][0].get("uhs")
+    except (KeyError, IndexError, TypeError):
+        pass
+
     # Export the EC P-256 key as BCRYPT_ECCPRIVATE_BLOB so xgameruntime.dll
     # can BCryptImportKeyPair() it byte-for-byte. Layout (104 bytes):
     #   dwMagic (LE u32 = BCRYPT_ECDSA_PRIVATE_P256_MAGIC 0x32534345)
@@ -1056,6 +1073,12 @@ def xbl_preauth(msa_access_token):
         "mp_token": mp_token,
         "mp_uhs": mp_uhs,
         "mp_expiry": mp_expiry,
+        # SISU for the licensing RP — used by the in-game Marketplace
+        # (http://licensing.xboxlive.com).
+        "lic_rp": lic_rp,
+        "lic_token": lic_token,
+        "lic_uhs": lic_uhs,
+        "lic_expiry": lic_expiry,
         "obtained": int(_time.time()),
     }
     out_path.write_text(json.dumps(out, indent=2))
@@ -1064,6 +1087,7 @@ def xbl_preauth(msa_access_token):
     if xbl_token: bits.append(f"XBL(xuid={xbl_claims.get('xid')},gtg={xbl_claims.get('gtg')})")
     if sisu_token: bits.append(f"SISU-pf(uhs={sisu_uhs})")
     if mp_token: bits.append(f"SISU-mp(uhs={mp_uhs})")
+    if lic_token: bits.append(f"SISU-lic(uhs={lic_uhs})")
     ok(f"Xbox Live pre-auth: {', '.join(bits)}")
     return True
 
