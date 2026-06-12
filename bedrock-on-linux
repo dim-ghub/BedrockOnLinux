@@ -1296,29 +1296,40 @@ def install_gdk_xbox_dlls(game_dir: Path):
 
 
 def _patch_hbui_signin_gate(game_dir: Path):
-    """Bypass HBUI's 'You need a Microsoft account' banner that blocks the
-    Servers tab: its derived facet (wB() in the minified JS bundle) reports
-    not-signed-in because XSAPI never completes init under Wine, even though
-    the SISU/PlayFab auth works. An early `return ""` makes every consumer
-    fall through to `default: return null`. Idempotent; skips silently when
-    a Minecraft update rebundles the JS (pattern must then be re-found)."""
+    """Two HBUI (oreUI) minified-bundle patches:
+    (1) The 'You need a Microsoft account' banner that blocks the Servers tab:
+        its derived facet wB() reports not-signed-in because XSAPI never
+        completes init under Wine even though the SISU/PlayFab auth works. An
+        early `return ""` makes every consumer fall through to `default: null`.
+    (2) The main play-screen Sign-in button/prompt: we sign in out-of-process
+        (device code), so MC's in-game 'Sign in' just opens its own MSA flow
+        that fails and reverts. Neutralise the NotLoggedInWithMSA state (prepend
+        `!1&&` to its gate) so that prompt/button never shows.
+    Idempotent; skips silently when an update rebundles the JS."""
     import glob
+    wb_needle = 'function wB(){return(0,l.useFacetMap)'
+    wb_done = 'function wB(){return"";return'
+    si_needle = ("if(!e.isLoggedInWithMicrosoftAccount&&"
+                 "!e.isSignInInProgress&&(t||n))return")
+    si_done = ("if(!1&&!e.isLoggedInWithMicrosoftAccount&&"
+               "!e.isSignInInProgress&&(t||n))return")
     for js in glob.glob(str(game_dir / "data/gui/dist/hbui/index-*.js")):
         try:
             data = Path(js).read_text()
         except OSError:
             continue
-        needle = 'function wB(){return(0,l.useFacetMap)'
-        already = 'function wB(){return"";return'
-        if already in data:
-            continue
-        if needle not in data:
+        orig = data
+        if wb_done not in data and wb_needle in data:
+            data = data.replace(wb_needle, wb_done, 1)
+        if si_done not in data and si_needle in data:
+            data = data.replace(si_needle, si_done, 1)
+        if data == orig:
             continue
         bak = js + ".bol-orig"
         if not Path(bak).exists():
             shutil.copy2(js, bak)
-        Path(js).write_text(data.replace(needle, 'function wB(){return"";return', 1))
-        ok(f"HBUI sign-in gate bypassed in {Path(js).name}")
+        Path(js).write_text(data)
+        ok(f"HBUI patched (sign-in gate + button) in {Path(js).name}")
         return
 
 
