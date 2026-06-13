@@ -2373,7 +2373,10 @@ def launch(_pp=None, _repaired=False, _force_x11=False, _no_gamescope=False):
     # Diagnostic (safe): the OpenSSL XCurl shim logs "DONE rc=.. http=.. url=.."
     # per request to <game>/xcurl.log when XCURL_LOG=1 (it tolerates fopen
     # failure). Friends/profiles/realms ride XCurl, invisible to WinHTTP traces.
-    if os.environ.get("BOL_XCURL_LOG"):
+    # On the dev branch this is forced on while we reverse-engineer the in-game
+    # social layer (peoplehub/social/profile response codes); BOL_XCURL_LOG=0
+    # opts out. The shim only writes when the env is exactly "1".
+    if os.environ.get("BOL_XCURL_LOG", "1") != "0":
         env["XCURL_LOG"] = "1"
     # cryptbase=n,b: prefer our cryptbase.dll RNG stub (installed in system32
     # by _install_cryptbase_in_prefix) so OpenSSL XCurl's RtlGenRandom forward

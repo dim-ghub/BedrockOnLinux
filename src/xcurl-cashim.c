@@ -5,7 +5,17 @@
  * So TLS verify (enforced in-game) fails. This shim exports the 16 curl_* symbols
  * the game resolves, forwards them to the REAL libcurl (shipped as xcurl_real.dll
  * beside this DLL), and intercepts curl_easy_init to set CURLOPT_CAINFO to
- * "cacert.pem" sitting next to this DLL — fully self-contained. */
+ * "cacert.pem" sitting next to this DLL — fully self-contained.
+ *
+ * It ALSO carries a diagnostic (only when XCURL_LOG=1 in the env): besides the
+ * "DONE rc=.. http=.. url=.." line per request, it captures the RESPONSE BODY of
+ * the in-game social endpoints (peoplehub/social/profile/persona/realms/club)
+ * that ride XCurl and are invisible to WinHTTP traces, so we can see why opening
+ * another player's profile / Realms spins forever even though the HTTP is 200.
+ * The body capture wraps CURLOPT_WRITEFUNCTION ONLY for those all-listed hosts —
+ * every other handle (login/PlayFab/marketplace/multiplayer) is passed straight
+ * through unchanged, so a bug here cannot regress anything that already works.
+ * When XCURL_LOG != 1 the shim does nothing beyond CA injection + URL rewrite. */
 #include <windows.h>
 #include <string.h>
 #include <stdio.h>
@@ -13,10 +23,14 @@
 #include <stdlib.h>
 
 typedef void CURL; typedef void CURLM;
-#define CURLOPT_CAINFO 10065
-#define CURLOPT_URL    10002
+#define CURLOPT_CAINFO        10065
+#define CURLOPT_URL           10002
+#define CURLOPT_WRITEDATA     10001
+#define CURLOPT_WRITEFUNCTION 20011
 #define CURLINFO_RESPONSE_CODE 0x200002
 #define CURLINFO_EFFECTIVE_URL 0x100001
+
+typedef size_t (*wfn_t)(char*, size_t, size_t, void*);
 
 static CRITICAL_SECTION g_cs;
 static int  g_cs_ready = 0;
@@ -96,27 +110,66 @@ static void init_once(void){
     LeaveCriticalSection(&g_cs);
 }
 
-/* tiny handle->URL map so we can label perform/info-read results */
-#define XMAP_N 256
-static CURL* g_h[XMAP_N];
-static char  g_u[XMAP_N][256];
-static void xmap_set(CURL* h, const char* url){
+/* per-handle slot: URL label + (diagnostic) response-body capture state */
+#define XMAP_N    256
+#define XBODY_CAP 7168
+struct hslot {
+    CURL*  h;
+    char   url[256];
+    int    watch;       /* URL is an in-game social endpoint -> capture body */
+    wfn_t  real_wf;     /* game's real write callback (NULL until it sets one) */
+    void*  real_wd;     /* game's real write userdata */
+    int    wrapped;     /* our trampoline is installed as this handle's WRITEFUNCTION */
+    int    blen;        /* bytes captured into body[] */
+    char   body[XBODY_CAP];
+};
+static struct hslot g_slot[XMAP_N];
+
+static struct hslot* slot_find(CURL* h, int create){
     int i, free_i=-1;
-    if(!g_cs_ready) return;
-    EnterCriticalSection(&g_cs);
-    for(i=0;i<XMAP_N;i++){ if(g_h[i]==h){free_i=i;break;} if(free_i<0&&!g_h[i])free_i=i; }
-    if(free_i>=0){ g_h[free_i]=h; if(url){ strncpy(g_u[free_i],url,255); g_u[free_i][255]=0; } else g_u[free_i][0]=0; }
-    LeaveCriticalSection(&g_cs);
+    for(i=0;i<XMAP_N;i++){ if(g_slot[i].h==h) return &g_slot[i]; if(free_i<0&&!g_slot[i].h)free_i=i; }
+    if(create && free_i>=0){ memset(&g_slot[free_i],0,sizeof g_slot[free_i]); g_slot[free_i].h=h; return &g_slot[free_i]; }
+    return NULL;
 }
-static const char* xmap_get(CURL* h){
-    int i; for(i=0;i<XMAP_N;i++) if(g_h[i]==h) return g_u[i];
-    return "?";
-}
-static void xmap_del(CURL* h){
+static void slot_del(CURL* h){
     int i; if(!g_cs_ready) return;
     EnterCriticalSection(&g_cs);
-    for(i=0;i<XMAP_N;i++) if(g_h[i]==h){ g_h[i]=0; g_u[i][0]=0; break; }
+    for(i=0;i<XMAP_N;i++) if(g_slot[i].h==h){ memset(&g_slot[i],0,sizeof g_slot[i]); break; }
     LeaveCriticalSection(&g_cs);
+}
+
+/* The in-game social/profile surfaces whose responses we want to see. Anything
+ * NOT on this list is never touched by the body-capture wrap. */
+static int url_watched(const char* u){
+    return u && ( strstr(u,"peoplehub.xboxlive")  || strstr(u,"social.xboxlive")
+               || strstr(u,"profile.xboxlive")    || strstr(u,"persona")
+               || strstr(u,"realms.minecraft")    || strstr(u,"clubhub")
+               || strstr(u,"clubaccounts")        || strstr(u,"userpresence") );
+}
+
+/* one-line body dump (newlines/CRs flattened so the log stays grep-able) */
+static void xlog_body(struct hslot* s){
+    int i; char* p;
+    if(!g_log || !s || s->blen<=0) return;
+    for(p=s->body,i=0;i<s->blen;i++,p++) if(*p=='\n'||*p=='\r'||*p=='\t') *p=' ';
+    xlog("BODY[%d%s] %s | %s\n", s->blen, (s->blen>=XBODY_CAP-1)?"+":"", s->url, s->body);
+}
+
+/* our WRITEFUNCTION trampoline: copy (capped) into the slot for logging, then
+ * forward verbatim to the game's real callback and return ITS value */
+static size_t write_tramp(char* ptr, size_t sz, size_t nm, void* ud){
+    struct hslot* s = (struct hslot*)ud;
+    size_t n = sz*nm;
+    if(s){
+        if(s->watch && s->blen < XBODY_CAP-1){
+            int room = XBODY_CAP-1 - s->blen;
+            int cp = (n < (size_t)room) ? (int)n : room;
+            memcpy(s->body + s->blen, ptr, cp);
+            s->blen += cp; s->body[s->blen]=0;
+        }
+        if(s->real_wf) return s->real_wf(ptr,sz,nm,s->real_wd);
+    }
+    return n;   /* no real callback known: pretend fully consumed */
 }
 
 __declspec(dllexport) CURL* curl_easy_init(void){
@@ -126,7 +179,7 @@ __declspec(dllexport) CURL* curl_easy_init(void){
     if(h && r_easy_setopt && g_ca[0]) r_easy_setopt(h, CURLOPT_CAINFO, g_ca);
     return h;
 }
-__declspec(dllexport) void curl_easy_cleanup(CURL* h){ init_once(); xmap_del(h); if(r_easy_cleanup) r_easy_cleanup(h); }
+__declspec(dllexport) void curl_easy_cleanup(CURL* h){ init_once(); slot_del(h); if(r_easy_cleanup) r_easy_cleanup(h); }
 __declspec(dllexport) int  curl_easy_setopt(CURL* h,int o,void* v){
     init_once();
     if(o==CURLOPT_URL && v){
@@ -139,22 +192,81 @@ __declspec(dllexport) int  curl_easy_setopt(CURL* h,int o,void* v){
          * The rewritten URL must outlive this call: this libcurl keeps the
          * CURLOPT_URL pointer (a stack/transient copy dangles and faults in
          * perform). Allocate it and leak it — tiny and only on Friends calls. */
+        const char* eff=url;
         const char* bad=strstr(url,"/users/xuid()/");
+        char* fixed=NULL;
         if(bad){
             size_t pre=(size_t)(bad-url);
             const char* rest=bad+14;              /* strlen("/users/xuid()/") */
             size_t need=pre+10+strlen(rest)+1;    /* 10 = strlen("/users/me/") */
-            char* fixed=(char*)malloc(need);
+            fixed=(char*)malloc(need);
             if(fixed){
                 memcpy(fixed,url,pre);
                 memcpy(fixed+pre,"/users/me/",10);
                 strcpy(fixed+pre+10,rest);
-                if(g_log) xmap_set(h,fixed);
+                eff=fixed;
                 xlog("rewrote empty xuid() -> me: %s\n", fixed);
-                return r_easy_setopt?r_easy_setopt(h,o,(void*)fixed):-1;
             }
         }
-        if(g_log) xmap_set(h,url);
+        if(g_log){
+            EnterCriticalSection(&g_cs);
+            struct hslot* s=slot_find(h,1);
+            if(s){
+                strncpy(s->url,eff,255); s->url[255]=0;
+                s->blen=0; s->body[0]=0;
+                s->watch=url_watched(eff);
+                /* if WRITEFUNCTION was already set on this handle and the URL is
+                 * now a watched one, install the trampoline retroactively */
+                if(s->watch && s->real_wf && !s->wrapped && r_easy_setopt){
+                    r_easy_setopt(h,CURLOPT_WRITEFUNCTION,(void*)write_tramp);
+                    r_easy_setopt(h,CURLOPT_WRITEDATA,(void*)s);
+                    s->wrapped=1;
+                }
+                /* reused handle now points at a NON-watched URL but still carries
+                 * our trampoline from a prior request: restore the real callback
+                 * so we never feed the game's writer our slot as its userdata */
+                else if(!s->watch && s->wrapped && r_easy_setopt){
+                    r_easy_setopt(h,CURLOPT_WRITEFUNCTION,(void*)s->real_wf);
+                    r_easy_setopt(h,CURLOPT_WRITEDATA,s->real_wd);
+                    s->wrapped=0;
+                }
+            }
+            LeaveCriticalSection(&g_cs);
+        }
+        return r_easy_setopt?r_easy_setopt(h,o,(void*)eff):-1;
+    }
+    /* Body-capture wrap — ONLY active under XCURL_LOG and ONLY for watched URLs.
+     * Everything else falls through to the real libcurl untouched. */
+    if(g_log && o==CURLOPT_WRITEFUNCTION){
+        EnterCriticalSection(&g_cs);
+        struct hslot* s=slot_find(h,1);
+        if(s){
+            s->real_wf=(wfn_t)v;
+            if(s->watch && v && r_easy_setopt){
+                int rc=r_easy_setopt(h,CURLOPT_WRITEFUNCTION,(void*)write_tramp);
+                r_easy_setopt(h,CURLOPT_WRITEDATA,(void*)s);   /* re-assert our userdata */
+                s->wrapped=1;
+                LeaveCriticalSection(&g_cs);
+                return rc;
+            }
+            s->wrapped=0;   /* not wrapping this handle: real WRITEFUNCTION below */
+        }
+        LeaveCriticalSection(&g_cs);
+        return r_easy_setopt?r_easy_setopt(h,o,v):-1;
+    }
+    if(g_log && o==CURLOPT_WRITEDATA){
+        EnterCriticalSection(&g_cs);
+        struct hslot* s=slot_find(h,1);
+        if(s){
+            s->real_wd=v;
+            if(s->wrapped && r_easy_setopt){
+                r_easy_setopt(h,CURLOPT_WRITEDATA,(void*)s);   /* keep slot as userdata */
+                LeaveCriticalSection(&g_cs);
+                return 0;
+            }
+        }
+        LeaveCriticalSection(&g_cs);
+        return r_easy_setopt?r_easy_setopt(h,o,v):-1;
     }
     return r_easy_setopt?r_easy_setopt(h,o,v):-1;
 }
@@ -178,7 +290,11 @@ __declspec(dllexport) void* curl_multi_info_read(CURLM* m,int* q){
         if(mm->msg==1 /*CURLMSG_DONE*/ && mm->e){
             long code=0; if(r_easy_getinfo) r_easy_getinfo(mm->e,CURLINFO_RESPONSE_CODE,&code);
             int rc=(int)(LONG_PTR)mm->res;
-            xlog("DONE rc=%d http=%ld url=%s\n", rc, code, xmap_get(mm->e));
+            EnterCriticalSection(&g_cs);
+            struct hslot* s=slot_find(mm->e,0);
+            xlog("DONE rc=%d http=%ld url=%s\n", rc, code, s?s->url:"?");
+            if(s && s->watch){ xlog_body(s); s->blen=0; s->body[0]=0; }
+            LeaveCriticalSection(&g_cs);
         }
     }
     return msg;
