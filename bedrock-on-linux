@@ -2185,7 +2185,9 @@ def launch(_pp=None, _repaired=False, _force_x11=False, _no_gamescope=False):
     # absent — native-only would leave SystemFunction036 unresolvable and
     # every Wine service + explorer.exe aborts (looks like a broken prefix).
     # Host WINEDLLOVERRIDES are kept if the user set any.
-    overrides = ["cryptbase=n,b"]
+    overrides = [
+        "cryptbase=n,b", "vrclient=d", "vrclient_x64=d", "wineopenxr=d"
+    ]
     cur = os.environ.get("WINEDLLOVERRIDES", "")
     if cur:
         overrides.append(cur)
@@ -2422,17 +2424,22 @@ def gui():
         warn("Tkinter missing (install python3-tk).")
         return
 
-    # Minecraft-launcher inspired palette: dark slate + signature green.
-    BG, PANEL, PANEL2 = "#181a20", "#23262e", "#2c303a"
-    FG, SUB, GOLD = "#f2f3f5", "#969ca6", "#e0b341"
-    GREEN, GREEN_H = "#4c9f4f", "#58b85b"
-    FIELD = "#2c303a"
+    # Minecraft-launcher inspired palette
+    MAIN_BG = "#1c1c1c"      # Fallback for background image
+    SIDEBAR = "#2b2b2b"      # Left sidebar
+    TOP_BAR = "#1c1c1c"      # Top bar in main area
+    PANEL = "#1a1a1a"        # Bottom bar inside main (very dark)
+    PANEL2 = "#2b2b2b"
+    FG, SUB, GOLD = "#ffffff", "#aaaaaa", "#e0b341"
+    GREEN, GREEN_H = "#3C8527", "#42962B"
+    FIELD = "#2b2b2b"
+    FONT = "Noto Sans"
 
     root = tk.Tk()
     root.title(PRETTY)
     root.geometry("880x560")
     root.minsize(800, 520)
-    root.configure(bg=BG)
+    root.configure(bg=MAIN_BG)
 
     icon_img = None
     here = Path(__file__).resolve().parent
@@ -2453,7 +2460,7 @@ def gui():
         stl.theme_use("clam")
     except Exception:
         pass
-    stl.configure(".", background=BG, foreground=FG, fieldbackground=FIELD,
+    stl.configure(".", background=MAIN_BG, foreground=FG, fieldbackground=FIELD,
                   bordercolor=PANEL2, lightcolor=PANEL2, darkcolor=PANEL2)
     stl.configure("Mc.TCombobox", fieldbackground=FIELD, background=FIELD,
                   foreground=FG, arrowcolor=FG, borderwidth=0, padding=8)
@@ -2483,104 +2490,200 @@ def gui():
         b.enable = enable
         return b
 
-    # ---- top bar: logo + title, account on the right ----
-    top = tk.Frame(root, bg=BG)
-    top.pack(fill="x", padx=24, pady=(16, 4))
+    # ---- LAYOUT: Sidebar (left) + Main Area (right) ----
+    sidebar = tk.Frame(root, bg=SIDEBAR, width=220)
+    sidebar.pack(side="left", fill="y")
+    sidebar.pack_propagate(False)
+
+    main_area = tk.Frame(root, bg=MAIN_BG)
+    main_area.pack(side="right", fill="both", expand=True)
+
+    # ---- SIDEBAR CONTENT ----
+    prof_frame = tk.Frame(sidebar, bg=SIDEBAR)
+    prof_frame.pack(fill="x", padx=16, pady=16)
+    
     if icon_img is not None:
         try:
-            sm = icon_img.subsample(max(1, icon_img.width() // 38))
-            il = tk.Label(top, image=sm, bg=BG)
-            il.image = sm
-            il.pack(side="left", padx=(0, 12))
+            sm_prof = icon_img.subsample(max(1, icon_img.width() // 24))
+            il_prof = tk.Label(prof_frame, image=sm_prof, bg=SIDEBAR)
+            il_prof.image = sm_prof
+            il_prof.pack(side="left", padx=(0, 8))
         except Exception:
             pass
-    tk.Label(top, text="BedrockOnLinux", bg=BG, fg=FG,
-             font=("", 16, "bold")).pack(side="left")
-
-    acct = tk.Frame(top, bg=PANEL)
-    acct.pack(side="right")
-    acct_dot = tk.Label(acct, text="●", bg=PANEL, fg=SUB)
-    acct_dot.pack(side="left", padx=(12, 6), pady=9)
+            
     acct_txt = tk.StringVar(value="Not signed in")
-    tk.Label(acct, textvariable=acct_txt, bg=PANEL, fg=FG).pack(side="left",
-                                                                pady=9)
-    acct_btn = button(acct, "Sign in", lambda: acct_click(), PANEL2, FG,
-                      "#363b46", ("", 10, "bold"), 12, 6)
-    acct_btn.pack(side="left", padx=(10, 8), pady=6)
+    acct_dot = tk.Label(prof_frame, text="●", bg=SIDEBAR, fg=SUB)
+    acct_dot.pack(side="left", padx=(0, 4))
+    tk.Label(prof_frame, textvariable=acct_txt, bg=SIDEBAR, fg=FG,
+             font=(FONT, 9)).pack(side="left")
+             
+    acct_btn = button(sidebar, "Sign in", lambda: acct_click(), SIDEBAR, SUB, PANEL2,
+                      (FONT, 9, "bold"), 12, 4)
+    acct_btn.pack(anchor="w", padx=16)
 
-    # ---- hero: centred logo + title ----
-    hero = tk.Frame(root, bg=BG)
-    hero.pack(fill="both", expand=True)
-    hw = tk.Frame(hero, bg=BG)
-    hw.place(relx=0.5, rely=0.42, anchor="center")
-    if icon_img is not None:
-        try:
-            f = max(1, icon_img.width() // 130)
-            hi = icon_img.subsample(f)
-            hl = tk.Label(hw, image=hi, bg=BG)
-            hl.image = hi
-            hl.pack()
-        except Exception:
-            pass
-    tk.Label(hw, text="Minecraft Bedrock", bg=BG, fg=FG,
-             font=("", 23, "bold")).pack(pady=(12, 2))
-    tk.Label(hw, text="Bedrock Edition for Linux",
-             bg=BG, fg=SUB, font=("", 11)).pack()
+    def sidebar_item(text, active=False):
+        f = tk.Frame(sidebar, bg=SIDEBAR)
+        f.pack(fill="x", pady=2)
+        if active:
+            tk.Frame(f, bg=GREEN, width=4).pack(side="left", fill="y")
+        else:
+            tk.Frame(f, bg=SIDEBAR, width=4).pack(side="left", fill="y")
+        tk.Label(f, text=text, bg=SIDEBAR, fg=FG if active else SUB,
+                 font=(FONT, 10, "bold" if active else "normal"), justify="left").pack(side="left", padx=(12, 16), pady=8)
 
-    # ---- bottom bar: version selector (left), gear/details/PLAY (right) ----
-    bar = tk.Frame(root, bg=PANEL)
-    bar.pack(fill="x", side="bottom")
-    barin = tk.Frame(bar, bg=PANEL)
-    barin.pack(fill="x", padx=24, pady=15)
+    sidebar_item("News", False)
+    sidebar_item("Minecraft: Java Edition", False)
+    sidebar_item("Minecraft for Windows", True)
+    sidebar_item("Minecraft Dungeons", False)
 
-    vbox = tk.Frame(barin, bg=PANEL)
-    vbox.pack(side="left")
-    tk.Label(vbox, text="VERSION", bg=PANEL, fg=SUB,
-             font=("", 8, "bold")).pack(anchor="w")
-    mc_var = tk.StringVar()
-    mc_cb = ttk.Combobox(vbox, textvariable=mc_var, width=24, state="readonly",
-                         style="Mc.TCombobox", font=("", 11))
-    mc_cb.pack(anchor="w", pady=(3, 0))
+    # ---- MAIN AREA CONTENT ----
+    # Top Bar
+    top_bar = tk.Frame(main_area, bg=TOP_BAR)
+    top_bar.pack(side="top", fill="x")
+    
+    tk.Label(top_bar, text="MINECRAFT FOR WINDOWS", bg=TOP_BAR, fg=FG,
+             font=(FONT, 14, "bold")).pack(anchor="w", padx=24, pady=(16, 8))
+             
+    tabs_frame = tk.Frame(top_bar, bg=TOP_BAR)
+    tabs_frame.pack(anchor="w", padx=24, pady=(0, 0))
 
-    play_btn = button(barin, "▶   PLAY", lambda: do_play(), GREEN, "white",
-                      GREEN_H, ("", 15, "bold"), 46, 14)
-    play_btn.pack(side="right")
-    button(barin, "⚙", lambda: open_settings(), PANEL, SUB, PANEL2,
-           ("", 15), 12, 10).pack(side="right", padx=(0, 12))
-    det_btn = button(barin, "Details", lambda: toggle_details(), PANEL, SUB,
-                     PANEL2, ("", 10), 12, 12)
-    det_btn.pack(side="right", padx=(0, 4))
+    pages_container = tk.Frame(main_area, bg=MAIN_BG)
+    pages_container.pack(fill="both", expand=True)
+    
+    page_play = tk.Frame(pages_container, bg=MAIN_BG)
+    page_settings = tk.Frame(pages_container, bg=MAIN_BG)
+    page_skins = tk.Frame(pages_container, bg=MAIN_BG)
 
-    # ---- status line + progress (above the bar) ----
-    status = tk.Frame(root, bg=BG)
-    status.pack(fill="x", side="bottom", padx=24, pady=(0, 8))
-    status_txt = tk.StringVar(value="Ready to play.")
-    status_lbl = tk.Label(status, textvariable=status_txt, bg=BG, fg=SUB,
-                          anchor="w")
-    status_lbl.pack(fill="x")
-    prog = ttk.Progressbar(status, style="Bar.Horizontal.TProgressbar",
-                           mode="determinate")
+    tabs_dict = {}
 
-    # ---- collapsible details log ----
-    detwrap = tk.Frame(root, bg=BG)
+    def switch_page(target_name):
+        pages = {
+            "play": page_play,
+            "skins": page_skins,
+            "settings": page_settings
+        }
+        for name, p_frame in pages.items():
+            if name == target_name:
+                p_frame.pack(fill="both", expand=True)
+                tabs_dict[name]["lbl"].configure(fg=FG)
+                tabs_dict[name]["line"].configure(bg=GREEN)
+            else:
+                p_frame.pack_forget()
+                tabs_dict[name]["lbl"].configure(fg=SUB)
+                tabs_dict[name]["line"].configure(bg=TOP_BAR)
+
+    def create_tab(name, text_label):
+        f = tk.Frame(tabs_frame, bg=TOP_BAR, cursor="hand2")
+        f.pack(side="left", padx=(0, 24))
+        lbl = tk.Label(f, text=text_label.upper(), bg=TOP_BAR, fg=SUB, font=(FONT, 10, "bold"), cursor="hand2")
+        lbl.pack()
+        line = tk.Frame(f, bg=TOP_BAR, height=3)
+        line.pack(fill="x", pady=(6, 0))
+        
+        def on_click(e):
+            switch_page(name)
+            
+        f.bind("<Button-1>", on_click)
+        lbl.bind("<Button-1>", on_click)
+        line.bind("<Button-1>", on_click)
+        
+        tabs_dict[name] = {"lbl": lbl, "line": line}
+
+    create_tab("play", "Play")
+    create_tab("skins", "Skins")
+    create_tab("settings", "Settings")
+    switch_page("play")
+
+    page_play.pack(fill="both", expand=True)
+
+    # Try loading bg image into page_play
+    bg_img = None
+    for p in (here / "data/bg.png", Path("/usr/lib/bedrock-on-linux/data/bg.png"), Path("/usr/share/bedrock-on-linux/bg.png")):
+        if p.exists():
+            try:
+                bg_img = tk.PhotoImage(file=str(p))
+                root._bg_img = bg_img  # prevent garbage collection
+                bg_lbl = tk.Label(page_play, image=bg_img, bg=MAIN_BG)
+                bg_lbl.place(x=0, y=0, relwidth=1, relheight=1)
+                break
+            except Exception as e:
+                print("ERROR loading background:", e)
+                pass
+
+    # Bottom Area Overlay (anchored at bottom of Play Page)
+    bottom_wrap = tk.Frame(page_play, bg=PANEL)
+    bottom_wrap.pack(fill="x", side="bottom")
+
+    # Details log (hidden by default)
+    detwrap = tk.Frame(page_play, bg=PANEL)
     logbox = tk.Text(detwrap, height=8, bg="#0d0f13", fg="#7fd97f", bd=0,
                      font=("monospace", 9), highlightthickness=0,
                      padx=10, pady=8)
-    logbox.pack(fill="both", expand=True, padx=24, pady=(0, 4))
     for _tg, (_lbl, _a1, _a2, _lc, _mc) in _LEVELS.items():
         _nm = _lbl.strip()
         logbox.tag_configure("L_" + _nm, foreground=_lc,
                              font=("monospace", 9, "bold"))
         logbox.tag_configure("M_" + _nm, foreground=_mc)
 
+    status = tk.Frame(bottom_wrap, bg=PANEL)
+    status.pack(fill="x", side="top", padx=24, pady=(0, 4))
+    status_txt = tk.StringVar(value="Ready to play.")
+    status_lbl = tk.Label(status, textvariable=status_txt, bg=PANEL, fg=SUB,
+                          anchor="w")
+    status_lbl.pack(fill="x")
+    prog = ttk.Progressbar(status, style="Bar.Horizontal.TProgressbar",
+                           mode="determinate")
+
+    bar = tk.Frame(bottom_wrap, bg=PANEL)
+    bar.pack(fill="x", side="bottom")
+    barin = tk.Frame(bar, bg=PANEL)
+    barin.pack(fill="x", padx=24, pady=(4, 15))
+
+    vbox = tk.Frame(barin, bg=PANEL)
+    vbox.pack(side="left")
+    mc_var = tk.StringVar()
+    mc_cb = ttk.Combobox(vbox, textvariable=mc_var, width=28, state="readonly",
+                         style="Mc.TCombobox", font=(FONT, 11))
+    mc_cb.pack(anchor="w")
+    button(vbox, "Details", lambda: toggle_details(), PANEL, SUB, PANEL2, (FONT, 8), 4, 4).pack(anchor="w", pady=(2, 0))
+
+    class MockBtn: pass
+    play_btn = MockBtn()
+    play_btn_lbl = tk.Label(barin, text="PLAY", bg=GREEN, fg=FG, font=(FONT, 24, "bold"),
+                        relief="flat", borderwidth=0, cursor="hand2", padx=90, pady=16)
+    def _play_enter(e): play_btn_lbl.configure(bg=GREEN_H)
+    def _play_leave(e): play_btn_lbl.configure(bg=GREEN)
+    def _play_click(e): do_play()
+    play_btn_lbl.bind("<Enter>", _play_enter)
+    play_btn_lbl.bind("<Leave>", _play_leave)
+    play_btn_lbl.bind("<Button-1>", _play_click)
+    
+    def _enable_play(en):
+        if en:
+            play_btn_lbl.configure(bg=GREEN, fg=FG, cursor="hand2")
+            play_btn_lbl.bind("<Enter>", _play_enter)
+            play_btn_lbl.bind("<Leave>", _play_leave)
+            play_btn_lbl.bind("<Button-1>", _play_click)
+        else:
+            play_btn_lbl.configure(bg="#444444", fg=SUB, cursor="")
+            play_btn_lbl.unbind("<Enter>")
+            play_btn_lbl.unbind("<Leave>")
+            play_btn_lbl.unbind("<Button-1>")
+    play_btn.enable = _enable_play
+
+    play_btn_lbl.pack(side="left", expand=True)
+    
+    tk.Label(barin, text="NOT ASSOCIATED WITH MOJANG", bg=PANEL, fg="#555555",
+             font=(FONT, 7, "bold")).pack(side="right", anchor="s")
+
     def toggle_details():
         ui["details"] = not ui["details"]
         if ui["details"]:
-            detwrap.pack(fill="both", side="bottom")
-            det_btn.configure(fg=FG)
+            detwrap.pack(fill="both", side="bottom", before=bottom_wrap)
+            logbox.pack(fill="both", expand=True, padx=24, pady=(0, 4))
         else:
             detwrap.pack_forget()
-            det_btn.configure(fg=SUB)
+            logbox.pack_forget()
 
     # ---- friendly status line + progress bar ----
     def set_status(t, color=SUB):
@@ -2789,45 +2892,292 @@ def gui():
                 root.after(0, lambda: busy(False))
         threading.Thread(target=work, daemon=True).start()
 
-    # ---- settings popup (the few advanced bits, out of the way) ----
-    def open_settings():
-        d = tk.Toplevel(root, bg=PANEL)
-        d.title("Settings")
-        d.configure(padx=26, pady=22)
-        d.transient(root)
-        d.resizable(False, False)
-        tk.Label(d, text="Settings", bg=PANEL, fg=FG,
-                 font=("", 14, "bold")).pack(anchor="w", pady=(0, 12))
-        beta_v = tk.BooleanVar(value=load_settings().get("show_betas", False))
+    # ---- settings page inline ----
+    tk.Label(page_settings, text="Settings", bg=MAIN_BG, fg=FG,
+             font=("", 14, "bold")).pack(anchor="w", padx=40, pady=(40, 12))
+    beta_v = tk.BooleanVar(value=load_settings().get("show_betas", False))
 
-        def save_beta():
-            s2 = load_settings()
-            s2["show_betas"] = beta_v.get()
-            save_settings(s2)
-            threading.Thread(target=refresh_versions, daemon=True).start()
-        tk.Checkbutton(d, text="Show beta / preview versions", variable=beta_v,
-                       command=save_beta, bg=PANEL, fg=FG, selectcolor=FIELD,
-                       activebackground=PANEL, activeforeground=FG, bd=0,
-                       highlightthickness=0, anchor="w").pack(fill="x", pady=2)
-        tk.Frame(d, bg=PANEL2, height=1).pack(fill="x", pady=12)
-        for label, fn in (
-            ("Open Minecraft folder", lambda: subprocess.Popen(
-              ["xdg-open", str(PFX 
-                  / "pfx/drive_c/users" 
-                  / os.environ.get("USER", "Public") 
-                  / "AppData/Roaming/Minecraft Bedrock/Users/Shared/games/com.mojang/")
-              ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)),
-            ("Open logs folder", lambda: subprocess.Popen(
-                ["xdg-open", str(LOGS)], stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL)),
-            ("Repair (reset Wine prefix)", lambda: threading.Thread(
-                target=reset_prefix, daemon=True).start()),
-            ("Force stop Minecraft", kill_wine),
-        ):
-            button(d, label, fn, PANEL2, FG, "#363b46", ("", 11), 14, 9
-                   ).pack(fill="x", pady=3)
-        tk.Label(d, text=f"{PRETTY} {VERSION}", bg=PANEL, fg=SUB,
-                 font=("", 9)).pack(anchor="w", pady=(14, 0))
+    def save_beta():
+        s2 = load_settings()
+        s2["show_betas"] = beta_v.get()
+        save_settings(s2)
+        threading.Thread(target=refresh_versions, daemon=True).start()
+
+    tk.Checkbutton(page_settings, text="Show beta / preview versions", variable=beta_v,
+                   command=save_beta, bg=MAIN_BG, fg=FG, selectcolor=FIELD,
+                   activebackground=MAIN_BG, activeforeground=FG, bd=0,
+                   highlightthickness=0, anchor="w").pack(fill="x", padx=40, pady=2)
+    tk.Frame(page_settings, bg=PANEL2, height=1).pack(fill="x", padx=40, pady=12)
+
+    def import_pack_dialog():
+            from tkinter import filedialog as fd
+            from tkinter import messagebox as mb
+            import zipfile
+            import json
+            import shutil
+
+            file_path = fd.askopenfilename(
+                parent=root,
+                title="Select .mcpack or .zip file",
+                filetypes=[("Minecraft Pack", "*.mcpack;*.zip"), ("All Files", "*.*")]
+            )
+            if not file_path:
+                return
+
+            try:
+                pfx_dir = active_prefix()
+                user_name = os.environ.get("USER", "steamuser")
+                users_base = pfx_dir / "drive_c/users"
+                target_user = "steamuser"
+                if (users_base / user_name).exists():
+                    target_user = user_name
+                elif (users_base / "steamuser").exists():
+                    target_user = "steamuser"
+                else:
+                    for u in users_base.iterdir():
+                        if u.is_dir() and u.name != "Public":
+                            target_user = u.name
+                            break
+
+                mojang_dir = pfx_dir / "drive_c/users" / target_user / "AppData/Roaming/Minecraft Bedrock/Users/Shared/games/com.mojang"
+                if not mojang_dir.exists():
+                    mojang_dir.mkdir(parents=True, exist_ok=True)
+
+                with zipfile.ZipFile(file_path, 'r') as z:
+                    manifest_entry = None
+                    for name in z.namelist():
+                        if name.endswith("manifest.json"):
+                            manifest_entry = name
+                            break
+                    
+                    if not manifest_entry:
+                        mb.showerror("Error", "Selected file is not a valid Minecraft pack (missing manifest.json).", parent=root)
+                        return
+                    
+                    try:
+                        manifest_data = json.loads(z.read(manifest_entry).decode('utf-8', errors='ignore'))
+                    except Exception as je:
+                        mb.showerror("Error", f"Failed to parse manifest.json: {je}", parent=root)
+                        return
+
+                    modules = manifest_data.get("modules", [])
+                    is_resource = False
+                    is_behavior = False
+                    for m in modules:
+                        mtype = m.get("type", "")
+                        if mtype == "resources":
+                            is_resource = True
+                        elif mtype in ("data", "client_data"):
+                            is_behavior = True
+
+                    if not is_resource and not is_behavior:
+                        mb.showerror("Error", "Could not determine pack type (must contain 'resources' or 'data' modules).", parent=root)
+                        return
+
+                    dest_folder_name = manifest_data.get("header", {}).get("name", "Unnamed Pack")
+                    dest_folder_name = "".join(c for c in dest_folder_name if c.isalnum() or c in (" ", "-", "_")).strip()
+                    if not dest_folder_name:
+                        dest_folder_name = manifest_data.get("header", {}).get("uuid", "unknown_pack")
+
+                    sub_dir = "resource_packs" if is_resource else "behavior_packs"
+                    target_dest = mojang_dir / sub_dir / dest_folder_name
+
+                    prefix_parts = manifest_entry.split('/')
+                    has_parent_dir = len(prefix_parts) > 1
+
+                    if target_dest.exists():
+                        if not mb.askyesno("Confirm Overwrite", f"Pack '{dest_folder_name}' already exists. Overwrite?", parent=root):
+                            return
+                        shutil.rmtree(target_dest)
+
+                    target_dest.mkdir(parents=True, exist_ok=True)
+
+                    for member in z.infolist():
+                        if member.is_dir():
+                            continue
+                        
+                        member_path = member.filename
+                        if has_parent_dir:
+                            parent_prefix = "/".join(prefix_parts[:-1]) + "/"
+                            if member_path.startswith(parent_prefix):
+                                rel_path = member_path[len(parent_prefix):]
+                            else:
+                                continue
+                        else:
+                            rel_path = member_path
+
+                        if not rel_path:
+                            continue
+                            
+                        dest_file = target_dest / rel_path
+                        dest_file.parent.mkdir(parents=True, exist_ok=True)
+                        with z.open(member) as source, open(dest_file, "wb") as target:
+                            shutil.copyfileobj(source, target)
+
+                mb.showinfo("Success", f"Successfully imported pack '{dest_folder_name}' as a {'Resource Pack' if is_resource else 'Behavior Pack'}.", parent=root)
+            except Exception as e:
+                mb.showerror("Error", f"Failed to import pack: {e}", parent=root)
+
+    button(page_settings, "Import Pack (.mcpack / .zip)", import_pack_dialog,
+           PANEL2, FG, "#40444b", ("", 11), 16, 8).pack(anchor="w", padx=40, pady=8)
+
+    # ---- skins page inline ----
+    tk.Label(page_skins, text="Custom Skins", bg=MAIN_BG, fg=FG,
+             font=("", 14, "bold")).pack(anchor="w", padx=40, pady=(40, 12))
+    tk.Label(page_skins, text="Import a .png skin file. It will be converted to a custom skin pack so Minecraft Bedrock on Linux can read it.",
+             bg=MAIN_BG, fg=SUB, font=("", 10)).pack(anchor="w", padx=40, pady=(0, 16))
+
+    def do_change_skin():
+        from tkinter import filedialog as fd
+        from tkinter import messagebox as mb
+        import shutil
+        import uuid
+
+        file_path = fd.askopenfilename(
+            parent=root,
+            title="Select Skin PNG Image",
+            filetypes=[("PNG Image", "*.png")]
+        )
+        if not file_path:
+            return
+
+            try:
+                pfx_dir = active_prefix()
+                user_name = os.environ.get("USER", "steamuser")
+                users_base = pfx_dir / "drive_c/users"
+                target_user = "steamuser"
+                if (users_base / user_name).exists():
+                    target_user = user_name
+                elif (users_base / "steamuser").exists():
+                    target_user = "steamuser"
+                else:
+                    for u in users_base.iterdir():
+                        if u.is_dir() and u.name != "Public":
+                            target_user = u.name
+                            break
+
+                mojang_dir = pfx_dir / "drive_c/users" / target_user / "AppData/Roaming/Minecraft Bedrock/Users/Shared/games/com.mojang"
+                skinpacks_dir = mojang_dir / "skin_packs" / "CustomSkins"
+                skinpacks_dir.mkdir(parents=True, exist_ok=True)
+
+                orig_name = Path(file_path).stem
+                sanitized_name = "".join(c for c in orig_name if c.isalnum() or c in ("-", "_")).strip()
+                if not sanitized_name:
+                    sanitized_name = "custom"
+                
+                skin_filename = f"skin_{sanitized_name}.png"
+                dest_png = skinpacks_dir / skin_filename
+                shutil.copy2(file_path, dest_png)
+
+                # Always write/overwrite manifest.json to ensure type is "skin_pack" (not skin_packs)
+                manifest_path = skinpacks_dir / "manifest.json"
+                manifest_data = {
+                    "format_version": 1,
+                    "header": {
+                        "name": "Custom Skins",
+                        "uuid": "43e265bd-9154-4f81-a8e1-56c469f626db",
+                        "version": [1, 0, 0]
+                    },
+                    "modules": [
+                        {
+                            "type": "skin_pack",
+                            "uuid": "79b4de5c-590f-48d6-bdc5-ec39178be05f",
+                            "version": [1, 0, 0]
+                        }
+                    ]
+                }
+                manifest_path.write_text(json.dumps(manifest_data, indent=2))
+
+                skins_path = skinpacks_dir / "skins.json"
+                skins_data = {
+                    "geometry": "geometry.json",
+                    "skins": [],
+                    "serialize_name": "CustomSkins",
+                    "localization_name": "CustomSkins"
+                }
+                if skins_path.exists():
+                    try:
+                        skins_data = json.loads(skins_path.read_text())
+                    except Exception:
+                        pass
+                
+                skins_data["geometry"] = "geometry.json"
+                skins_data["serialize_name"] = "CustomSkins"
+                skins_data["localization_name"] = "CustomSkins"
+                if "skins" not in skins_data or not isinstance(skins_data["skins"], list):
+                    skins_data["skins"] = []
+                
+                skin_exists = False
+                localization_name = sanitized_name
+                for skin in skins_data.get("skins", []):
+                    if skin.get("texture") == skin_filename:
+                        skin_exists = True
+                        localization_name = skin.get("localization_name", sanitized_name)
+                        break
+                
+                if not skin_exists:
+                    is_slim = mb.askyesno("Choose Model Type", "Is this a slim-armed (Alex-style) skin?", parent=root)
+                    geom = "geometry.humanoid.customSlim" if is_slim else "geometry.humanoid.custom"
+                    
+                    skins_data["skins"].append({
+                        "localization_name": localization_name,
+                        "geometry": geom,
+                        "texture": skin_filename,
+                        "type": "free"
+                    })
+                
+                skins_path.write_text(json.dumps(skins_data, indent=2))
+
+                texts_dir = skinpacks_dir / "texts"
+                texts_dir.mkdir(exist_ok=True)
+                lang_path = texts_dir / "en_US.lang"
+                
+                lang_lines = []
+                if lang_path.exists():
+                    lang_lines = lang_path.read_text(errors="ignore").splitlines()
+                
+                pack_name_key = "skinpack.CustomSkins=Custom Skins"
+                skin_key = f"skin.CustomSkins.{localization_name}={orig_name}"
+                
+                if pack_name_key not in lang_lines:
+                    lang_lines.append(pack_name_key)
+                
+                found_key = False
+                for idx, line in enumerate(lang_lines):
+                    if line.startswith(f"skin.CustomSkins.{localization_name}="):
+                        lang_lines[idx] = skin_key
+                        found_key = True
+                        break
+                if not found_key:
+                    lang_lines.append(skin_key)
+                
+                lang_path.write_text("\n".join(lang_lines) + "\n")
+
+                mb.showinfo("Success", f"Successfully imported skin '{orig_name}'! In Minecraft, go to Dressing Room > Classic Skins > Owned to select your custom skin.", parent=root)
+            except Exception as e:
+                mb.showerror("Error", f"Failed to import skin: {e}", parent=root)
+
+    button(page_skins, "Import Skin (.png)", do_change_skin,
+           PANEL2, FG, "#40444b", ("", 11), 16, 8).pack(anchor="w", padx=40)
+
+    for label, fn in (
+        ("Open Minecraft folder", lambda: subprocess.Popen(
+          ["xdg-open", str(PFX 
+              / "pfx/drive_c/users" 
+              / os.environ.get("USER", "Public") 
+              / "AppData/Roaming/Minecraft Bedrock/Users/Shared/games/com.mojang/")
+          ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)),
+        ("Open logs folder", lambda: subprocess.Popen(
+            ["xdg-open", str(LOGS)], stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL)),
+        ("Repair (reset Wine prefix)", lambda: threading.Thread(
+            target=reset_prefix, daemon=True).start()),
+        ("Force stop Minecraft", kill_wine),
+    ):
+        button(page_settings, label, fn, PANEL2, FG, "#363b46", ("", 11), 14, 9).pack(fill="x", padx=40, pady=3)
+    
+    tk.Label(page_settings, text=f"{PRETTY} {VERSION}", bg=MAIN_BG, fg=SUB,
+             font=("", 9)).pack(anchor="w", padx=40, pady=(14, 0))
 
     # ---- self-update notification (background check → banner) ----
     def relaunch_app():
