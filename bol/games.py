@@ -82,6 +82,17 @@ def use_game_dir(folder):
     CONTENT.symlink_to(folder)
     s = load_settings()
     s["game_dir"] = str(folder)
+    # Remember the version actually selected so the picker and auto-select
+    # default to the version you last played (else the latest) — never a stale
+    # one. games/<tag>/ gives the exact release tag; fall back to the manifest.
+    ver = None
+    try:
+        ver = folder.relative_to(GAMES.resolve()).parts[0]
+    except ValueError:
+        ver = None
+    ver = ver or mc_version_str(folder)
+    if ver:
+        s["mc_version"] = ver
     save_settings(s)
     return folder
 
@@ -94,7 +105,12 @@ def mc_version_str(game_dir: Path):
                           man.read_text(errors="ignore"))
             if m:
                 p = m.group(3)
-                return f"{m.group(1)}.{m.group(2)}.{int(p[:2]) if len(p)>=2 else int(p)}"
+                # Bedrock packs "<minor><patch>" into the Appx 3rd field, e.g.
+                # 2004 -> "20.4", 3005 -> "30.5", 0301 -> "3.1" — split it back
+                # so the result matches the release tags (e.g. 1.26.20.4).
+                if len(p) >= 3:
+                    return f"{m.group(1)}.{m.group(2)}.{int(p[:2])}.{int(p[2:])}"
+                return f"{m.group(1)}.{m.group(2)}.{int(p)}"
     return None
 
 

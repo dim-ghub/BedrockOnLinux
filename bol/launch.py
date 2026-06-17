@@ -99,13 +99,18 @@ def launch(_pp=None, _repaired=False, _force_x11=False, _no_gamescope=False):
     # resolves, but FALL BACK to the GDK-Proton builtin when the stub is
     # absent — native-only would leave SystemFunction036 unresolvable and
     # every Wine service + explorer.exe aborts (looks like a broken prefix).
-    # Minecraft Bedrock is not a VR title, but Proton wires up its SteamVR
-    # shim (vrclient / vrclient_x64 / openvr_api) by default. On a host with
-    # Steam present it asserts in vrclient_main.c ("!status", issue #14),
-    # crashes the launch and pops Steam open. Disable the VR DLLs outright so
-    # they never load (empty value == disabled in WINEDLLOVERRIDES).
-    # Host WINEDLLOVERRIDES are kept if the user set any.
-    overrides = ["cryptbase=n,b", "vrclient=", "vrclient_x64=", "openvr_api="]
+    # Minecraft Bedrock probes VR at startup (OpenVR, then OpenXR) but is not a
+    # VR title on Linux. Proton wires up both runtimes, and leaving them enabled
+    # crashes the launch (issue #14): the OpenVR/SteamVR shim asserts in
+    # vrclient_main.c (and opens Steam); once that's disabled the game falls
+    # through to OpenXR, whose Wine runtime (wineopenxr) can't hook Vulkan
+    # ("get_native_VkDevice not found") so the game page-faults on the invalid
+    # handle. Disable every VR runtime so both probes fail cleanly and the game
+    # runs flat. (openxr_loader is left alone — the EXE may import it; we only
+    # drop the runtime behind it.) Empty value == disabled in WINEDLLOVERRIDES;
+    # host WINEDLLOVERRIDES are kept if the user set any.
+    overrides = ["cryptbase=n,b", "vrclient=", "vrclient_x64=", "openvr_api=",
+                 "wineopenxr="]
     cur = os.environ.get("WINEDLLOVERRIDES", "")
     if cur:
         overrides.append(cur)
