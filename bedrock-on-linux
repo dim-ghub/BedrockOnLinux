@@ -2132,7 +2132,7 @@ def diagnose():
     return hits
 
 
-def launch(_pp=None, _repaired=False, _force_x11=False, _no_gamescope=False):
+def launch(_pp=None, _repaired=False, _force_x11=False, _no_gamescope=False, _file=None):
     s = load_settings()
     gd = s.get("game_dir")
     if not gd or not Path(gd, "Minecraft.Windows.exe").exists():
@@ -2173,6 +2173,9 @@ def launch(_pp=None, _repaired=False, _force_x11=False, _no_gamescope=False):
     kill_wine()
     exe = str(CONTENT / "Minecraft.Windows.exe")
     cmd, env = proton_umu_cmd(exe)
+    if _file:
+        z_path = "Z:" + str(Path(_file).resolve()).replace("/", "\\")
+        cmd.append(z_path)
     env["PROTON_LOG"] = "1"
     env["PROTON_LOG_DIR"] = str(LOGS)
     # +gdkc,+winhttp puts PlayFab/SISU HTTP statuses in proton.log (the
@@ -3262,11 +3265,15 @@ def gui():
 
 
 def main():
+    if len(sys.argv) == 2 and Path(sys.argv[1]).exists() and sys.argv[1].endswith((".mcaddon", ".mcpack", ".mcworld", ".mctemplate")):
+        sys.argv = [sys.argv[0], "play", "--file", sys.argv[1]]
+
     p = argparse.ArgumentParser(prog=APP, description=f"{PRETTY} {VERSION}")
     sub = p.add_subparsers(dest="cmd")
 
     sub.add_parser("gui", help="open the launcher (default)")
-    sub.add_parser("play", help="launch Minecraft")
+    pl = sub.add_parser("play", help="launch Minecraft")
+    pl.add_argument("--file", help="import a .mcaddon, .mcpack, or .mcworld file")
     sp = sub.add_parser("setup", help="download & prepare Minecraft")
     sp.add_argument("--mc", metavar="VERSION",
                     help="Minecraft version tag (e.g. 1.26.21.1)")
@@ -3291,7 +3298,7 @@ def main():
             do_setup(mc_ver=mc, force=a.force)
             ok(f"Done. Run:  {APP} play")
         elif a.cmd == "play":
-            launch()
+            launch(_file=getattr(a, "file", None))
         elif a.cmd == "versions":
             for v in list_mc_versions(a.beta):
                 print(f"  {v['tag']:<14}{'beta' if v['beta'] else 'stable':>7}"
