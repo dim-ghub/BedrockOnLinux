@@ -69,6 +69,46 @@
   </content_rating>
 
   <releases>
+    <release version="1.1.2" date="2026-06-17">
+      <description>
+        <p>The bundled game engine now auto-updates: when a newer WineGDK
+           engine is published, the launcher re-downloads it on the next
+           launch — the same way the launcher updates itself — so the in-game
+           sign-in and server-join fixes reach everyone, not just fresh
+           installs.</p>
+      </description>
+    </release>
+    <release version="1.1.1" date="2026-06-17">
+      <description>
+        <p>Fixes after 1.1.0:</p>
+        <ul>
+          <li>fixes a crash on the first launch after install, caused by
+              Proton's OpenXR runtime — VR is now fully disabled so the game
+              starts straight into normal (flat) mode;</li>
+          <li>the version picker now defaults to the version you last played
+              (or the latest) instead of resetting to a different one;</li>
+          <li>the in-game sign-in and native-server-join binary patches now
+              track the game across the 1.26.x updates.</li>
+        </ul>
+      </description>
+    </release>
+    <release version="1.1.0" date="2026-06-17">
+      <description>
+        <p>Internal refactor into a Python package, with fixes for the open
+           bug reports:</p>
+        <ul>
+          <li>fixes a startup crash and a spurious Steam launch caused by
+              Proton's VR client;</li>
+          <li>initialises the Wine prefix before installing the input and
+              login components, fixing a "system32 not found" failure on a
+              fresh install;</li>
+          <li>fixes the Flatpak failing to start under a pure Wayland
+              session;</li>
+          <li>makes Microsoft sign-in reliable by ensuring the required
+              Python dependency is present on every install.</li>
+        </ul>
+      </description>
+    </release>
     <release version="1.0.9" date="2026-06-11">
       <description>
         <p>Flatpak packaging, plus two Wayland input fixes:</p>
