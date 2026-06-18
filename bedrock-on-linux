@@ -2913,116 +2913,42 @@ def gui():
     tk.Frame(page_settings, bg=PANEL2, height=1).pack(fill="x", padx=40, pady=12)
 
     def import_pack_dialog():
-            from tkinter import filedialog as fd
-            from tkinter import messagebox as mb
-            import zipfile
-            import json
-            import shutil
+        from tkinter import filedialog as fd
+        from tkinter import messagebox as mb
+        
+        file_path = fd.askopenfilename(
+            parent=root,
+            title="Select Minecraft Add-on or World",
+            filetypes=[("Minecraft Files", "*.mcpack;*.mcaddon;*.mcworld;*.mctemplate;*.zip"), ("All Files", "*.*")]
+        )
+        if not file_path:
+            return
+            
+        if ui.get("busy"):
+            mb.showerror("Error", "The launcher is currently busy. Please wait.", parent=root)
+            return
 
-            file_path = fd.askopenfilename(
-                parent=root,
-                title="Select .mcpack or .zip file",
-                filetypes=[("Minecraft Pack", "*.mcpack;*.zip"), ("All Files", "*.*")]
-            )
-            if not file_path:
-                return
+        busy(True)
+        set_status("Preparing to import…", FG)
+        bar_busy()
 
+        def work():
             try:
-                pfx_dir = active_prefix()
-                user_name = os.environ.get("USER", "steamuser")
-                users_base = pfx_dir / "drive_c/users"
-                target_user = "steamuser"
-                if (users_base / user_name).exists():
-                    target_user = user_name
-                elif (users_base / "steamuser").exists():
-                    target_user = "steamuser"
-                else:
-                    for u in users_base.iterdir():
-                        if u.is_dir() and u.name != "Public":
-                            target_user = u.name
-                            break
-
-                mojang_dir = pfx_dir / "drive_c/users" / target_user / "AppData/Roaming/Minecraft Bedrock/Users/Shared/games/com.mojang"
-                if not mojang_dir.exists():
-                    mojang_dir.mkdir(parents=True, exist_ok=True)
-
-                with zipfile.ZipFile(file_path, 'r') as z:
-                    manifest_entry = None
-                    for name in z.namelist():
-                        if name.endswith("manifest.json"):
-                            manifest_entry = name
-                            break
-                    
-                    if not manifest_entry:
-                        mb.showerror("Error", "Selected file is not a valid Minecraft pack (missing manifest.json).", parent=root)
-                        return
-                    
-                    try:
-                        manifest_data = json.loads(z.read(manifest_entry).decode('utf-8', errors='ignore'))
-                    except Exception as je:
-                        mb.showerror("Error", f"Failed to parse manifest.json: {je}", parent=root)
-                        return
-
-                    modules = manifest_data.get("modules", [])
-                    is_resource = False
-                    is_behavior = False
-                    for m in modules:
-                        mtype = m.get("type", "")
-                        if mtype == "resources":
-                            is_resource = True
-                        elif mtype in ("data", "client_data"):
-                            is_behavior = True
-
-                    if not is_resource and not is_behavior:
-                        mb.showerror("Error", "Could not determine pack type (must contain 'resources' or 'data' modules).", parent=root)
-                        return
-
-                    dest_folder_name = manifest_data.get("header", {}).get("name", "Unnamed Pack")
-                    dest_folder_name = "".join(c for c in dest_folder_name if c.isalnum() or c in (" ", "-", "_")).strip()
-                    if not dest_folder_name:
-                        dest_folder_name = manifest_data.get("header", {}).get("uuid", "unknown_pack")
-
-                    sub_dir = "resource_packs" if is_resource else "behavior_packs"
-                    target_dest = mojang_dir / sub_dir / dest_folder_name
-
-                    prefix_parts = manifest_entry.split('/')
-                    has_parent_dir = len(prefix_parts) > 1
-
-                    if target_dest.exists():
-                        if not mb.askyesno("Confirm Overwrite", f"Pack '{dest_folder_name}' already exists. Overwrite?", parent=root):
-                            return
-                        shutil.rmtree(target_dest)
-
-                    target_dest.mkdir(parents=True, exist_ok=True)
-
-                    for member in z.infolist():
-                        if member.is_dir():
-                            continue
-                        
-                        member_path = member.filename
-                        if has_parent_dir:
-                            parent_prefix = "/".join(prefix_parts[:-1]) + "/"
-                            if member_path.startswith(parent_prefix):
-                                rel_path = member_path[len(parent_prefix):]
-                            else:
-                                continue
-                        else:
-                            rel_path = member_path
-
-                        if not rel_path:
-                            continue
-                            
-                        dest_file = target_dest / rel_path
-                        dest_file.parent.mkdir(parents=True, exist_ok=True)
-                        with z.open(member) as source, open(dest_file, "wb") as target:
-                            shutil.copyfileobj(source, target)
-
-                mb.showinfo("Success", f"Successfully imported pack '{dest_folder_name}' as a {'Resource Pack' if is_resource else 'Behavior Pack'}.", parent=root)
+                ver = selected_version()
+                do_setup(mc_ver=ver, progress=set_progress)
+                set_status("Starting Minecraft to import…", FG)
+                launch(_file=file_path)
+                set_status("Minecraft closed.", SUB)
             except Exception as e:
-                mb.showerror("Error", f"Failed to import pack: {e}", parent=root)
+                _LOG_SINK(f"xx {e}")
+                root.after(0, lambda: mb.showerror("Error", f"Failed to launch for import: {e}", parent=root))
+            finally:
+                end_progress()
+                root.after(0, lambda: busy(False))
+        threading.Thread(target=work, daemon=True).start()
 
-    button(page_settings, "Import Pack (.mcpack / .zip)", import_pack_dialog,
-           PANEL2, FG, "#40444b", ("", 11), 16, 8).pack(anchor="w", padx=40, pady=8)
+    button(page_settings, "Import Add-on / World", import_pack_dialog,
+           PANEL2, FG, "#40444b", (FONT, 11), 16, 8).pack(anchor="w", padx=40, pady=8)
 
     # ---- skins page inline ----
     tk.Label(page_skins, text="Custom Skins", bg=MAIN_BG, fg=FG,
